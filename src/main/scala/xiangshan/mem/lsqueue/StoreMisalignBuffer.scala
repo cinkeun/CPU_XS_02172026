@@ -106,7 +106,7 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
     val rob             = Flipped(new RobLsqIO)
     val splitStoreReq   = Decoupled(new LsPipelineBundle)
     val splitStoreResp  = Flipped(Valid(new SqWriteBundle))
-    val writeBack       = Decoupled(new ExuOutput(staParams.head))
+    val writeBack       = DecoupledIO(new NewExuOutput(staParams.head))
     val vecWriteBack    = Vec(VecStorePipelineWidth, Decoupled(new VecPipelineFeedbackIO(isVStore = true)))
     val overwriteExpBuf = Output(new XSBundle {
       val valid = Bool()
@@ -391,9 +391,9 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
         }
 
         is (SH) {
-          lowAddrStore.uop.fuOpType := SB
+          lowAddrStore.uop.fuOpType := SH
           lowAddrStore.vaddr := req.vaddr
-          lowAddrStore.mask  := 0x1.U << lowAddrStore.vaddr(3, 0)
+          lowAddrStore.mask  := 0x3.U
           lowResultWidth    := BYTE1
 
           highAddrStore.uop.fuOpType := SB
@@ -410,8 +410,8 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
 
             is ("b01".U) {
               lowAddrStore.uop.fuOpType := SW
-              lowAddrStore.vaddr := req.vaddr - 1.U
-              lowAddrStore.mask  := 0xf.U << lowAddrStore.vaddr(3, 0)
+              lowAddrStore.vaddr := req.vaddr
+              lowAddrStore.mask  := 0xf.U
               lowResultWidth    := BYTE3
 
               highAddrStore.uop.fuOpType := SB
@@ -421,9 +421,9 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
             }
 
             is ("b10".U) {
-              lowAddrStore.uop.fuOpType := SH
+              lowAddrStore.uop.fuOpType := SW
               lowAddrStore.vaddr := req.vaddr
-              lowAddrStore.mask  := 0x3.U << lowAddrStore.vaddr(3, 0)
+              lowAddrStore.mask  := 0xf.U
               lowResultWidth    := BYTE2
 
               highAddrStore.uop.fuOpType := SH
@@ -433,9 +433,9 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
             }
 
             is ("b11".U) {
-              lowAddrStore.uop.fuOpType := SB
+              lowAddrStore.uop.fuOpType := SW
               lowAddrStore.vaddr := req.vaddr
-              lowAddrStore.mask  := 0x1.U << lowAddrStore.vaddr(3, 0)
+              lowAddrStore.mask  := 0xf.U
               lowResultWidth    := BYTE1
 
               highAddrStore.uop.fuOpType := SW
@@ -454,8 +454,8 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
 
             is ("b001".U) {
               lowAddrStore.uop.fuOpType := SD
-              lowAddrStore.vaddr := req.vaddr - 1.U
-              lowAddrStore.mask  := 0xff.U << lowAddrStore.vaddr(3, 0)
+              lowAddrStore.vaddr := req.vaddr
+              lowAddrStore.mask  := 0xff.U
               lowResultWidth    := BYTE7
 
               highAddrStore.uop.fuOpType := SB
@@ -466,8 +466,8 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
 
             is ("b010".U) {
               lowAddrStore.uop.fuOpType := SD
-              lowAddrStore.vaddr := req.vaddr - 2.U
-              lowAddrStore.mask  := 0xff.U << lowAddrStore.vaddr(3, 0)
+              lowAddrStore.vaddr := req.vaddr
+              lowAddrStore.mask  := 0xff.U
               lowResultWidth    := BYTE6
 
               highAddrStore.uop.fuOpType := SH
@@ -478,8 +478,8 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
 
             is ("b011".U) {
               lowAddrStore.uop.fuOpType := SD
-              lowAddrStore.vaddr := req.vaddr - 3.U
-              lowAddrStore.mask  := 0xff.U << lowAddrStore.vaddr(3, 0)
+              lowAddrStore.vaddr := req.vaddr
+              lowAddrStore.mask  := 0xff.U
               lowResultWidth    := BYTE5
 
               highAddrStore.uop.fuOpType := SW
@@ -489,9 +489,9 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
             }
 
             is ("b100".U) {
-              lowAddrStore.uop.fuOpType := SW
+              lowAddrStore.uop.fuOpType := SD
               lowAddrStore.vaddr := req.vaddr
-              lowAddrStore.mask  := 0xf.U << lowAddrStore.vaddr(3, 0)
+              lowAddrStore.mask  := 0xff.U
               lowResultWidth    := BYTE4
 
               highAddrStore.uop.fuOpType := SW
@@ -502,8 +502,8 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
 
             is ("b101".U) {
               lowAddrStore.uop.fuOpType := SD
-              lowAddrStore.vaddr := req.vaddr - 5.U
-              lowAddrStore.mask  := 0xff.U << lowAddrStore.vaddr(3, 0)
+              lowAddrStore.vaddr := req.vaddr
+              lowAddrStore.mask  := 0xff.U
               lowResultWidth    := BYTE3
 
               highAddrStore.uop.fuOpType := SD
@@ -514,8 +514,8 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
 
             is ("b110".U) {
               lowAddrStore.uop.fuOpType := SD
-              lowAddrStore.vaddr := req.vaddr - 6.U
-              lowAddrStore.mask  := 0xff.U << lowAddrStore.vaddr(3, 0)
+              lowAddrStore.vaddr := req.vaddr
+              lowAddrStore.mask  := 0xff.U
               lowResultWidth    := BYTE2
 
               highAddrStore.uop.fuOpType := SD
@@ -526,8 +526,8 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
 
             is ("b111".U) {
               lowAddrStore.uop.fuOpType := SD
-              lowAddrStore.vaddr := req.vaddr - 7.U
-              lowAddrStore.mask  := 0xff.U << lowAddrStore.vaddr(3, 0)
+              lowAddrStore.vaddr := req.vaddr
+              lowAddrStore.mask  := 0xff.U
               lowResultWidth    := BYTE1
 
               highAddrStore.uop.fuOpType := SD
@@ -597,26 +597,27 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
     }
   }
 
-  io.writeBack.valid := req_valid && (bufferState === s_wb) && !req.isvec
-  io.writeBack.bits := 0.U.asTypeOf(io.writeBack.bits)
-  io.writeBack.bits.pdest := req.uop.pdest
-  io.writeBack.bits.robIdx := req.uop.robIdx
-  io.writeBack.bits.intWen.foreach(_ := req.uop.rfWen)
-  io.writeBack.bits.exceptionVec.foreach(x => {
+  val writeBack = Wire(new NewExuOutput(staParams.head))
+  writeBack.toRob.valid := req_valid && (bufferState === s_wb) && !req.isvec
+  writeBack.pdest := req.uop.pdest
+  writeBack.toRob.bits.robIdx := req.uop.robIdx
+  writeBack.toRob.bits.exceptionVec.foreach(x => {
     x := 0.U.asTypeOf(x)
     StaCfg.exceptionOut.map(no => x(no) := (globalUncache || globalException) && exceptionVec(no))
   })
-  io.writeBack.bits.flushPipe.foreach(_ := false.B)
-  io.writeBack.bits.lqIdx.foreach(_ := req.uop.lqIdx)
-  io.writeBack.bits.sqIdx.foreach(_ := req.uop.sqIdx)
-  io.writeBack.bits.trigger.foreach(_ := req.uop.trigger)
-  io.writeBack.bits.debug.isMMIO := globalMMIO
-  io.writeBack.bits.debug.isNCIO := globalNC && !globalMemBackTypeMM
-  io.writeBack.bits.debug.isPerfCnt := false.B
-  io.writeBack.bits.debug.paddr := req.paddr
-  io.writeBack.bits.debug.vaddr := req.vaddr
-  io.writeBack.bits.perfDebugInfo.foreach(_  := req.uop.perfDebugInfo)
-  io.writeBack.bits.debug_seqNum.foreach(_  := req.uop.debug_seqNum)
+  writeBack.toRob.bits.lqIdx.foreach(_ := req.uop.lqIdx)
+  writeBack.toRob.bits.sqIdx.foreach(_ := req.uop.sqIdx)
+  writeBack.toRob.bits.trigger.foreach(_ := req.uop.trigger)
+  writeBack.toRob.bits.isRVC.foreach(_ := req.uop.isRVC)
+  writeBack.debug.isMMIO := globalMMIO
+  writeBack.debug.isNCIO := globalNC && !globalMemBackTypeMM
+  writeBack.debug.isPerfCnt := false.B
+  writeBack.debug.paddr := req.paddr
+  writeBack.debug.vaddr := req.vaddr
+  writeBack.perfDebugInfo.foreach(_  := req.uop.perfDebugInfo)
+  writeBack.debug_seqNum.foreach(_  := req.uop.debug_seqNum)
+
+  connectMemDecoupledNewExuOutput(io.writeBack, writeBack)
 
   io.vecWriteBack.zipWithIndex.map{
     case (wb, index) => {
@@ -631,8 +632,6 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
       wb.bits.mmio              := globalMMIO
       wb.bits.exceptionVec      := ExceptionNO.selectByFu(exceptionVec, VstuCfg)
       wb.bits.hasException      := globalException
-      wb.bits.usSecondInv       := req.usSecondInv
-      wb.bits.vecFeedback       := true.B
       wb.bits.elemIdx           := req.elemIdx
       wb.bits.alignedType       := req.alignedType
       wb.bits.mask              := req.mask
