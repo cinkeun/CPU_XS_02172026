@@ -20,161 +20,139 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import scala.math.min
 import utility.XSPerfAccumulate
+import utility.sram.SRAMTemplate
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.FoldedHistoryInfo
 import xiangshan.frontend.bpu.SaturateCounter
 import xiangshan.frontend.bpu.history.phr.PhrAllFoldedHistories
+import yunsuan.vector.alu.VIntFixpTable.table
 
+// MicroTage table module implementing a banked SRAM with write buffer
 class MicroTageTable(
-    val numSets:       Int,
-    val histLen:       Int,
-    val tagLen:        Int,
-    val histBitsInTag: Int,
-    val tableId:       Int
+    val numSets:  Int,
+    val numWay:   Int,
+    val tableId:  Int,
+    val NumBanks: Int = 4
 )(implicit p: Parameters) extends MicroTageModule with Helpers {
+  // IO bundle definition
   class MicroTageTableIO extends MicroTageBundle {
+    // Request bundle for table access
     class MicroTageReq extends Bundle {
-      val startPc:        PrunedAddr            = new PrunedAddr(VAddrBits)
-      val foldedPathHist: PhrAllFoldedHistories = Input(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
+      val readIndex: UInt = UInt(log2Ceil(numSets).W)
     }
+    // Response bundle for table read
     class MicroTageResp extends Bundle {
-      val taken:       Bool            = Bool()
-      val cfiPosition: UInt            = UInt(CfiPositionWidth.W)
-      val useful:      UInt            = UInt(UsefulWidth.W)
-      val hitTakenCtr: SaturateCounter = TakenCounter()
-      val hitUseful:   SaturateCounter = UsefulCounter()
+      val readEntries: Vec[MicroTageEntry] = Vec(numWay, new MicroTageEntry)
     }
-    class MicroTageUpdate extends Bundle {
-      val startPc:                PrunedAddr            = new PrunedAddr(VAddrBits)
-      val allocValid:             Bool                  = Bool()
-      val updateValid:            Bool                  = Bool()
-      val usefulValid:            Bool                  = Bool()
-      val allocTaken:             Bool                  = Bool()
-      val allocCfiPosition:       UInt                  = UInt(CfiPositionWidth.W)
-      val updateTaken:            Bool                  = Bool()
-      val updateCfiPosition:      UInt                  = UInt(CfiPositionWidth.W)
-      val usefulCorrect:          Bool                  = Bool()
-      val foldedPathHistForTrain: PhrAllFoldedHistories = new PhrAllFoldedHistories(AllFoldedHistoryInfo)
-    }
-    val req:         MicroTageReq           = Input(new MicroTageReq)
-    val resp:        Valid[MicroTageResp]   = Output(Valid(new MicroTageResp))
-    val update:      Valid[MicroTageUpdate] = Input(Valid(new MicroTageUpdate))
-    val usefulReset: Bool                   = Input(Bool())
-    // Will be automatically optimized away when unused; no need to wrap in Option.
-    val debug_predIdx: UInt           = UInt(log2Ceil(numSets).W)
-    val debug_predTag: UInt           = UInt(tagLen.W)
-    val trainDebug:    MicroTageDebug = Output(new MicroTageDebug)
+    val req:         Valid[MicroTageReq] = Input(Valid(new MicroTageReq))
+    val resps:       MicroTageResp       = Output(new MicroTageResp)
+    val train:       MicroTageTrain      = new MicroTageTrain(numWay, numSets)
+    val usefulReset: Bool                = Input(Bool())
+    val resetDone:   Bool                = Output(Bool())
   }
-  class MicroTageEntry() extends MicroTageBundle {
-    val valid:       Bool            = Bool()
-    val tag:         UInt            = UInt(tagLen.W)
-    val takenCtr:    SaturateCounter = TakenCounter()
-    val cfiPosition: UInt            = UInt(CfiPositionWidth.W)
-    // val useful:      SaturateCounter = UsefulCounter()
+  val io = IO(new MicroTageTableIO)
+  // Write buffer to handle write conflicts
+  private val wbuffer = Module(new BypassShadowBuffer(numSets, numWay, 16, tableId, NumBanks))
+
+  // Banked SRAM for storing MicroTage entries
+  private val entrySram = Seq.tabulate(NumBanks) { bankIdx =>
+    Module(new SRAMTemplate(
+      new MicroTageEntry,
+      set = numSets / NumBanks,
+      way = numWay,
+      singlePort = true,
+      shouldReset = true,
+      withClockGate = true,
+      hasMbist = hasMbist,
+      hasSramCtl = hasSramCtl,
+      suffix = Option("bpu_utage")
+    )).suggestName(s"utage_entry_sram_bank${bankIdx}")
   }
-  val io                    = IO(new MicroTageTableIO)
-  private val entries       = RegInit(VecInit(Seq.fill(numSets)(0.U.asTypeOf(new MicroTageEntry))))
-  private val usefulEntries = RegInit(VecInit(Seq.fill(numSets)(UsefulCounter.Zero)))
-
-  val idxFhInfo    = new FoldedHistoryInfo(histLen, min(log2Ceil(numSets), histLen))
-  val tagFhInfo    = new FoldedHistoryInfo(histLen, min(histLen, histBitsInTag))
-  val altTagFhInfo = new FoldedHistoryInfo(histLen, min(histLen, histBitsInTag - 1))
-
-  def computeHash(startPc: PrunedAddr, allFh: PhrAllFoldedHistories, tableId: Int): (UInt, UInt) = {
-    val unhashedIdx = getUnhashedIdx(startPc)
-    val unhashedTag = getUnhashedTag(startPc)
-    val idxFh       = allFh.getHistWithInfo(idxFhInfo).foldedHist
-    val tagFh       = allFh.getHistWithInfo(tagFhInfo).foldedHist
-    val altTagFh    = allFh.getHistWithInfo(altTagFhInfo).foldedHist
-    val idx = if (idxFhInfo.FoldedLength < log2Ceil(numSets)) {
-      val foldShift = log2Ceil(numSets) - idxFhInfo.FoldedLength
-      (unhashedIdx ^ Cat(0.U(foldShift.W), idxFh) ^ (idxFh << foldShift))(log2Ceil(numSets) - 1, 0)
-    } else {
-      (unhashedIdx ^ idxFh)(log2Ceil(numSets) - 1, 0)
-    }
-    val lowTag  = (unhashedTag ^ tagFh ^ (altTagFh << 1))(histBitsInTag - 1, 0)
-    val highTag = connectPcTag(unhashedIdx, tableId)
-    val tag     = Cat(highTag, lowTag)(tagLen - 1, 0)
-    (idx, tag)
-  }
-
-  // predict
-  private val (s0_idx, s0_tag) = computeHash(io.req.startPc, io.req.foldedPathHist, tableId)
-  private val readEntry        = entries(s0_idx)
-  private val readHit          = (readEntry.tag === s0_tag) && readEntry.valid
-  private val usefulEntry      = usefulEntries(s0_idx)
-  io.debug_predIdx := s0_idx
-  io.debug_predTag := s0_tag
-
-  io.resp.valid            := readHit
-  io.resp.bits.taken       := readEntry.takenCtr.isPositive
-  io.resp.bits.cfiPosition := readEntry.cfiPosition
-  io.resp.bits.useful      := usefulEntry.value
-  io.resp.bits.hitTakenCtr := readEntry.takenCtr
-  io.resp.bits.hitUseful   := usefulEntry
-
-  // train
-  private val (trainIdx, trainTag) =
-    computeHash(io.update.bits.startPc, io.update.bits.foldedPathHistForTrain, tableId)
-
-  private val oldTakenCtr = entries(trainIdx).takenCtr
-  private val oldUseful   = usefulEntries(trainIdx)
-  private val updateEntry = Wire(new MicroTageEntry)
-  updateEntry.valid := true.B
-  updateEntry.tag   := trainTag
-  updateEntry.takenCtr := Mux(
-    io.update.bits.allocValid,
-    // oldTakenCtr.getNeutral,
-    Mux(
-      io.update.bits.allocTaken,
-      TakenCounter.WeakPositive,
-      TakenCounter.WeakNegative
-    ),
-    oldTakenCtr.getUpdate(io.update.bits.updateTaken)
-  )
-
-  updateEntry.cfiPosition := Mux(
-    io.update.bits.allocValid,
-    io.update.bits.allocCfiPosition,
-    io.update.bits.updateCfiPosition
-  )
-
-  private val updateUseful = Mux(
-    io.update.bits.allocValid,
-    if (tableId == 0) { UsefulCounter.WeakNegative }
-    else { UsefulCounter.WeakPositive },
-    oldUseful.getUpdate(io.update.bits.usefulCorrect)
-  )
-
-  // Write back updated entry on valid update
-  when(io.update.valid && (io.update.bits.allocValid || io.update.bits.updateValid)) {
-    entries(trainIdx) := updateEntry
-  }
-
-  when(io.update.valid && (io.update.bits.usefulValid || io.update.bits.allocValid)) {
-    usefulEntries(trainIdx) := updateUseful // updateEntry.useful
-  }
-
-  when(io.usefulReset) {
-    usefulEntries.zipWithIndex.foreach { case (entry, i) =>
-      if (tableId == 0) {
-        usefulEntries(i).selfDecrease()
-      } else {
-        usefulEntries(i).value := entry.value >> 1.U
-      }
-    }
-  }
-
-  // ------------ for debug signal ----------- //
-  io.trainDebug                := 0.U.asTypeOf(new MicroTageDebug)
-  io.trainDebug.debug_idx      := trainIdx
-  io.trainDebug.debug_tag      := trainTag
-  io.trainDebug.debug_tableId  := tableId.U
-  io.trainDebug.debug_useful   := oldUseful.value
-  io.trainDebug.debug_takenCtr := oldTakenCtr.value
-  // Per-index access distribution
-  // for (i <- 0 until numSets) {
-  //   XSPerfAccumulate(f"update_idx_access_$i", (trainIdx === i.U) && io.update.valid)
-  //   XSPerfAccumulate(f"alloc_idx_access_$i", (trainIdx === i.U) && io.update.valid && io.update.bits.allocValid)
+  // private val entrySram = Seq.tabulate(NumBanks) { bankIdx =>
+  //   Module(new FoldedSRAMTemplate(
+  //     Vec(numWay, new MicroTageEntry),
+  //     setSplit = 1,
+  //     waySplit = 1,
+  //     dataSplit = 1,
+  //     set = numSets / NumBanks,
+  //     width = 1,
+  //     shouldReset = true,
+  //     holdRead = false,
+  //     singlePort = true,
+  //     useBitmask = true,
+  //     withClockGate = false,
+  //     hasMbist = hasMbist,
+  //     hasSramCtl = hasSramCtl,
+  //     suffix = Option("bpu_utage")
+  //   )).suggestName(s"utage_entry_sram_bank$bankIdx")
   // }
+
+  // Calculate bank selection for read access
+  private val bankId             = getBankId(io.req.bits.readIndex, NumBanks)
+  private val bankOH             = UIntToOH(bankId)
+  private val bankReadInnerIndex = getBankInnerIndex(io.req.bits.readIndex, NumBanks, numSets)
+
+  // Read from all SRAM banks
+  entrySram.zipWithIndex.foreach { case (bank, bankIdx) =>
+    bank.io.r.req.valid       := bankOH(bankIdx)
+    bank.io.r.req.bits.setIdx := bankReadInnerIndex
+  }
+
+  io.resetDone := entrySram.map(_.io.r.req.ready).reduce(_ && _)
+
+  // Pipeline stage: capture bank selection from previous cycle
+  private val a1_bankOH = RegNext(bankOH, 0.U(NumBanks.W))
+  // Collect read responses from all banks
+  private val bankReadRespVec = VecInit(entrySram.map(_.io.r.resp.data))
+  // Select the appropriate bank's response based on a1_bankOH
+  private val bankReadEntries = Mux1H(a1_bankOH, bankReadRespVec)
+
+  // Check if requested data is in write buffer
+  wbuffer.io.req.readIndex := io.req.bits.readIndex
+  private val bufferHit         = wbuffer.io.resp.hit
+  private val bufferReadEntries = wbuffer.io.resp.readEntries
+  // Convert SRAM response to proper type
+  private val sramRealReadEntries = WireDefault(0.U.asTypeOf(Vec(numWay, new MicroTageEntry)))
+  private val sramReadEntries     = bankReadEntries.asTypeOf(Vec(numWay, new MicroTageEntry))
+  sramRealReadEntries := sramReadEntries
+
+  // Select data from buffer (if hit) or SRAM (if miss)
+  private val readEntries = VecInit(
+    (bufferHit, bufferReadEntries, sramRealReadEntries).zipped.map {
+      case (hit, bufferEntry, sramEntry) => Mux(hit, bufferEntry, sramEntry)
+    }
+  )
+
+  // Output read entries
+  io.resps.readEntries := readEntries
+
+  // Determine if write can proceed to SRAM
+  // Write succeeds if accessing different banks or forceWrite is set
+  private val writeSuccess =
+    ((getBankId(io.req.bits.readIndex, NumBanks) =/= getBankId(wbuffer.io.tryWrite.bits.writeIndex, NumBanks)) ||
+      wbuffer.io.tryWrite.bits.forceWrite) && wbuffer.io.tryWrite.valid
+
+  // Connect training and control signals to write buffer
+  wbuffer.io.train <> io.train
+  wbuffer.io.writeSuccess := writeSuccess
+  wbuffer.io.usefulReset  := io.usefulReset
+
+  private val tryWrite       = wbuffer.io.tryWrite.valid
+  private val writeBankId    = getBankId(wbuffer.io.tryWrite.bits.writeIndex, NumBanks)
+  private val writeEntry     = wbuffer.io.tryWrite.bits.writeData
+  private val bankWriteIndex = getBankInnerIndex(wbuffer.io.tryWrite.bits.writeIndex, NumBanks, numSets)
+  private val forceWrite     = wbuffer.io.tryWrite.bits.forceWrite
+  private val writeMask      = wbuffer.io.tryWrite.bits.wMask
+  entrySram.zipWithIndex.foreach { case (bank, bankIdx) =>
+    val writeValid = (!bank.io.r.req.valid || forceWrite) && tryWrite && (writeBankId === bankIdx.U)
+    bank.io.w(writeValid, writeEntry, bankWriteIndex, writeMask)
+  // bank.io.w.apply(writeValid, writeEntry, bankWriteIndex, true.B, writeMaskBits)
+  }
+
+  private val needCheckConflict = RegNext(forceWrite && tryWrite, false.B)
+  private val writeOHNext       = RegNext(UIntToOH(writeBankId))
+  // Handle read-write conflicts in SRAM.
+  for (i <- 0 until numWay) {
+    sramRealReadEntries(i).valid := !((writeOHNext === a1_bankOH) && needCheckConflict) && sramReadEntries(i).valid
+  }
 }

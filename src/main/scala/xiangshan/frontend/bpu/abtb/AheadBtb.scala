@@ -30,11 +30,14 @@ import xiangshan.frontend.bpu.Prediction
  */
 class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   class AheadBtbIO(implicit p: Parameters) extends BasePredictorIO with HasFastTrainIO {
-    val redirectValid: Bool                   = Input(Bool())
-    val overrideValid: Bool                   = Input(Bool())
-    val prediction:    Vec[Valid[Prediction]] = Output(Vec(NumAheadBtbPredictionEntries, Valid(new Prediction)))
-    val meta:          AheadBtbMeta           = Output(new AheadBtbMeta)
-    val debug_startPc: PrunedAddr             = Output(PrunedAddr(VAddrBits))
+    val redirectValid: Bool                       = Input(Bool())
+    val overrideValid: Bool                       = Input(Bool())
+    val prediction:    Vec[Valid[Prediction]]     = Output(Vec(NumAheadBtbPredictionEntries, Valid(new Prediction)))
+    val abtbResult:    Vec[Valid[AheadBtbResult]] = Output(Vec(NumAheadBtbPredictionEntries, Valid(new AheadBtbResult)))
+    val abtbResultPos: Vec[UInt]                  = Output(Vec(NumAheadBtbPredictionEntries, UInt(CfiPositionWidth.W)))
+    val abtbPos:       Vec[UInt]                  = Output(Vec(NumAheadBtbPredictionEntries, UInt(CfiPositionWidth.W)))
+    val meta:          AheadBtbMeta               = Output(new AheadBtbMeta)
+    val debug_startPc: PrunedAddr                 = Output(PrunedAddr(VAddrBits))
   }
   val io: AheadBtbIO = IO(new AheadBtbIO)
 
@@ -145,11 +148,12 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   private val s3_entries  = RegInit(0.U.asTypeOf(s1_entries))
   private val s3_startPc  = RegInit(0.U.asTypeOf(s1_startPc))
 
-  private val s2_setIdx   = RegEnable(Mux(overrideValid, s3_setIdx, s1_setIdx), s1_fire)
-  private val s2_bankIdx  = RegEnable(Mux(overrideValid, s3_bankIdx, s1_bankIdx), s1_fire)
-  private val s2_bankMask = RegEnable(Mux(overrideValid, s3_bankMask, s1_bankMask), s1_fire)
-  private val s2_entries  = RegEnable(Mux(overrideValid, s3_entries, s1_entries), s1_fire)
-  private val s2_startPc  = RegEnable(s1_startPc, s1_fire)
+  private val s1_realEntries = Mux(overrideValid, s3_entries, s1_entries)
+  private val s2_setIdx      = RegEnable(Mux(overrideValid, s3_setIdx, s1_setIdx), s1_fire)
+  private val s2_bankIdx     = RegEnable(Mux(overrideValid, s3_bankIdx, s1_bankIdx), s1_fire)
+  private val s2_bankMask    = RegEnable(Mux(overrideValid, s3_bankMask, s1_bankMask), s1_fire)
+  private val s2_entries     = RegEnable(s1_realEntries, s1_fire)
+  private val s2_startPc     = RegEnable(s1_startPc, s1_fire)
 
   when(s2_fire) {
     s3_setIdx   := s2_setIdx
@@ -159,7 +163,8 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
     s3_startPc  := s2_startPc
   }
 
-  private val s2_ctrResult = takenCounter(s2_bankIdx)(s2_setIdx).map(_.isPositive)
+  private val s2_ctrResult  = takenCounter(s2_bankIdx)(s2_setIdx).map(_.isPositive)
+  private val s2_strongBias = takenCounter(s2_bankIdx)(s2_setIdx).map(x => x.isSaturatePositive || x.isSaturateNegative)
 
   private val s2_tag = getTag(s2_startPc)
   dontTouch(s2_tag)
@@ -175,6 +180,21 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
     pred.bits.cfiPosition := s2_entries(i).position
     pred.bits.attribute   := s2_entries(i).attribute
     pred.bits.target      := getFullTarget(s2_startPc, s2_entries(i).targetLowerBits, s2_entries(i).targetCarry)
+  }
+  io.abtbResult.zipWithIndex.foreach { case (pred, i) =>
+    pred.valid             := s2_valid && s2_hitMask(i)
+    pred.bits.taken        := s2_ctrResult(i)
+    pred.bits.cfiPosition  := s2_entries(i).position
+    pred.bits.attribute    := s2_entries(i).attribute
+    pred.bits.isStrongBias := s2_strongBias(i)
+  }
+  io.abtbResultPos.zipWithIndex.map { case (pos, i) =>
+    // Aggregates scattered position bits from wide entries for matrix comparison.
+    pos := RegEnable(s1_realEntries(i).position, s1_fire)
+  }
+  io.abtbPos.zipWithIndex.map { case (pos, i) =>
+    // Direct routing to MicroTage for pipelined comparison; potentially timing beneficial.
+    pos := s1_realEntries(i).position
   }
 
   io.meta.valid    := s2_valid

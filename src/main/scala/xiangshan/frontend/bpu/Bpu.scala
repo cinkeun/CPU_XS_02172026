@@ -152,9 +152,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s2_abtbMeta = RegEnable(abtb.io.meta, s1_fire)
   private val s3_abtbMeta = RegEnable(s2_abtbMeta, s2_fire)
 
-  private val s1_utageMeta = Wire(new MicroTageMeta)
-  private val s2_utageMeta = RegEnable(s1_utageMeta, s1_fire)
-  private val s3_utageMeta = RegEnable(s2_utageMeta, s2_fire)
+  private val s1_utageMeta     = Wire(new MicroTageMeta)
+  private val s2_utageMeta     = RegEnable(s1_utageMeta, s1_fire)
+  private val s2_realUtageMeta = Wire(new MicroTageMeta)
+  private val s3_utageMeta     = RegEnable(s2_realUtageMeta, s2_fire)
 
   /* *** common inputs *** */
   private val stageCtrl = Wire(new StageCtrl)
@@ -201,8 +202,11 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   abtb.io.overrideValid := s3_override
 
   utage.io.foldedPathHist         := phr.io.s0_foldedPhr
-  utage.io.foldedPathHistForTrain := phr.io.s3_foldedPhr
-  utage.io.abtbPrediction         := abtb.io.prediction
+  utage.io.foldedPathHistForTrain := phr.io.trainFoldedPhr
+  utage.io.abtbPrediction         := abtb.io.abtbResult
+  utage.io.abtbPosVec             := abtb.io.abtbPos
+  utage.io.overrideValid          := s3_override
+  utage.io.redirectValid          := redirect.valid
 
   // uras
   uras.io.specIn.startPc     := s1_startPc
@@ -242,10 +246,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s2_ready := s2_fire || !s2_valid
   s3_ready := s3_fire || !s3_valid
 
-  s0_fire := s1_ready && predictors.map(_.io.resetDone).reduce(_ && _)
-  s1_fire := s1_valid && s2_ready && io.toFtq.prediction.ready
-  s2_fire := s2_valid && s3_ready
-  s3_fire := s3_valid
+  private val resetDone = RegInit(false.B)
+  resetDone := predictors.map(_.io.resetDone).reduce(_ && _)
+  s0_fire   := s1_ready && resetDone
+  s1_fire   := s1_valid && s2_ready && io.toFtq.prediction.ready
+  s2_fire   := s2_valid && s3_ready
+  s3_fire   := s3_valid
 
   when(s0_fire)(s1_valid := true.B)
     .elsewhen(s1_flush)(s1_valid := false.B)
@@ -262,59 +268,46 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   // s0_stall should be exclusive with any other PC source
   s0_stall := !(s1_valid || s3_override || redirect.valid)
 
-  // * *** s1 prediction selection *** */
-  private val s1_btbPrediction = VecInit(ubtb.io.prediction) ++ abtb.io.prediction
-  private val s1_utageHitMask = VecInit(s1_btbPrediction.map { pred =>
-    pred.valid && utage.io.prediction.valid && utage.io.prediction.bits.cfiPosition === pred.bits.cfiPosition
-  })
-  private val s1_takenMask = VecInit(s1_btbPrediction.zipWithIndex.map { case (pred, i) =>
-    val utageHit   = s1_utageHitMask(i)
-    val utageTaken = utage.io.prediction.bits.taken
+  private val s1_ubtbPrediction = ubtb.io.prediction
+  private val s1_abtbPrediction = abtb.io.prediction
+  private val s1_abtbPosition   = abtb.io.abtbResultPos
+  private val s1_utageHitMask   = utage.io.prediction.hitVec
+  private val s1_utageTakenMask = utage.io.prediction.takenVec
+  private val s1_abtbTakenMask = VecInit(s1_abtbPrediction.zipWithIndex.map { case (pred, i) =>
     pred.valid && (
       pred.bits.attribute.isDirect ||
         pred.bits.attribute.isIndirect ||
-        pred.bits.attribute.isConditional && Mux(utageHit, utageTaken, pred.bits.taken)
+        pred.bits.attribute.isConditional && Mux(s1_utageHitMask(i), s1_utageTakenMask(i), pred.bits.taken)
     )
   })
 
-  // the old way to get taken mask
-//  private val s1_baseTakenMask = VecInit(s1_btbPrediction.map { pred =>
-//    pred.valid && (
-//      pred.bits.attribute.isDirect ||
-//        pred.bits.attribute.isIndirect ||
-//        pred.bits.attribute.isConditional && pred.bits.taken
-//    )
-//  })
-//  private val s1_microTageTakenMask = VecInit(s1_btbPrediction.zip(s1_utageHitMask).map { case (e, microTageHit) =>
-//    e.valid && (
-//      e.bits.attribute.isDirect ||
-//        e.bits.attribute.isIndirect ||
-//        e.bits.attribute.isConditional && Mux(microTageHit, utage.io.prediction.bits.taken, false.B)
-//    )
-//  })
-//  private val s1_useMicroTage = s1_utageHitMask.reduce(_ || _)
-//  private val s1_takenMask    = Mux(s1_useMicroTage, s1_microTageTakenMask, s1_baseTakenMask)
+  private val s1_compareMatrix      = CompareMatrix(s1_abtbPosition)
+  private val s1_abtbFirstTakenBrOH = s1_compareMatrix.getLeastElementOH(s1_abtbTakenMask)
+  private val s1_abtbFirstTakenBr   = Mux1H(s1_abtbFirstTakenBrOH, s1_abtbPrediction)
+  private val s1_abtbValid          = s1_abtbPrediction.map(_.valid).reduce(_ || _)
 
-  private val s1_taken              = s1_takenMask.reduce(_ || _)
-  private val s1_compareMatrix      = CompareMatrix(VecInit(s1_btbPrediction.map(_.bits.cfiPosition)))
-  private val s1_firstTakenBranchOH = s1_compareMatrix.getLeastElementOH(s1_takenMask)
-  private val s1_firstTakenBranch   = Mux1H(s1_firstTakenBranchOH, s1_btbPrediction)
-
-  s1_prediction       := Mux(s1_taken, s1_firstTakenBranch.bits, fallThrough.io.prediction)
-  s1_prediction.taken := s1_taken
+  private val s1_abtbResult = Wire(new Prediction)
+  s1_abtbResult       := s1_abtbFirstTakenBr.bits
+  s1_abtbResult.taken := s1_abtbFirstTakenBrOH.reduce(_ || _)
+  s1_prediction := Mux(
+    s1_abtbValid,
+    Mux(s1_abtbResult.taken, s1_abtbResult, fallThrough.io.prediction),
+    Mux(s1_ubtbPrediction.bits.taken, s1_ubtbPrediction.bits, fallThrough.io.prediction)
+  )
 
   private val s1_isRet = s1_prediction.attribute.isReturn
   when(s1_isRet && uras.io.specOut.isCanUse) {
     s1_prediction.target := uras.io.specOut.retTarget
   }
 
-  private val debug_s1UseUbtb      = s1_taken && s1_firstTakenBranchOH(0) && !s1_utageHitMask(0)
-  private val debug_s1UseUbtbUtage = s1_taken && s1_firstTakenBranchOH(0) && s1_utageHitMask(0)
-  private val debug_s1UseAbtb      = s1_taken && !s1_firstTakenBranchOH(0) && !s1_utageHitMask.drop(1).reduce(_ || _)
-  private val debug_s1UseAbtbUtage = s1_taken && !s1_firstTakenBranchOH(0) && s1_utageHitMask.drop(1).reduce(_ || _)
+  private val s1_taken             = s1_prediction.taken
+  private val useAbtb              = s1_abtbValid && s1_abtbResult.taken
+  private val debug_s1UseUbtb      = s1_taken && !useAbtb
+  private val debug_s1UseUbtbUtage = s1_taken && !useAbtb
+  private val debug_s1UseAbtb      = s1_taken && useAbtb && !s1_utageHitMask.reduce(_ || _)
+  private val debug_s1UseAbtbUtage = s1_taken && useAbtb && s1_utageHitMask.reduce(_ || _)
 
   s1_utageMeta := utage.io.meta.bits
-  s1_utageMeta.debug_useMicroTage.foreach(_ := s1_utageHitMask.reduce(_ || _))
 
   private val s2_mbtbResult  = mbtb.io.result
   private val s2_condHitMask = VecInit(s2_mbtbResult.map(e => e.valid && e.bits.attribute.isConditional))
@@ -376,6 +369,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   private val s2_s1Prediction = RegEnable(s1_prediction, s1_fire)
   private val s3_s1Prediction = RegEnable(s2_s1Prediction, s2_fire)
+  s2_realUtageMeta := s2_utageMeta
+  s2_realUtageMeta.abtbResult.zipWithIndex.map {
+    case (result, idx) =>
+      result.valid := s2_utageMeta.abtbResult(idx).valid &&
+        (s2_utageMeta.abtbResult(idx).cfiPosition <= s2_s1Prediction.cfiPosition)
+  }
 
   s3_override := s3_valid && !(s3_prediction === s3_s1Prediction)
 
@@ -402,7 +401,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_resolveMeta.sc     := sc.io.meta
   s3_resolveMeta.ittage := ittage.io.meta
   s3_resolveMeta.phr    := s3_phrMeta
-  s3_resolveMeta.debug_utage.foreach(_ := s3_utageMeta)
+  // s3_resolveMeta.debug_utage.foreach(_ := s3_utageMeta)
+  s3_resolveMeta.utage := s3_utageMeta
 
   private val s3_commitMeta = Wire(new BpuCommitMeta)
   s3_commitMeta.ras := ras.io.commitMeta
