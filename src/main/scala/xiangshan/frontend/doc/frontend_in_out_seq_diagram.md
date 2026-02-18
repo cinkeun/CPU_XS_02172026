@@ -90,37 +90,88 @@ sequenceDiagram
 
 ---
 
-## 3. Sequence Diagram — Group B: BPU Redirect (S2/S3 Override)
+## 3. Pipeline Diagram — Group B: BPU Override (BTB 간 예측 불일치 → Redirect)
 
-> BPU S2 또는 S3가 S1 예측보다 더 정확한 target 계산 → FTQ에 override, IFU flush
+> BPU 3단계 파이프라인에서 후속 stage가 **동일한 fetch 블록(PC_A, ftq_idx=X)**에 대해 더 정확한 예측을 내리면
+> FTQ entry의 target을 갱신하고, 이미 전송된 IFU 요청을 flush 후 재시작한다.
+>
+> 우선순위 (`selectedResp`): **S3 redirect > S2 redirect > S1**
+>
+> | 기호 | 의미 |
+> |:---|:---|
+> | `★` | redirect 발생 (hasRedirect=true) |
+> | `✓` | 상위 stage와 동일 예측 — redirect 없음 |
+> | `[OB(0)]` | `overrideBubble(0)`: S2 → BPU 내부 **S1** in-flight kill |
+> | `[OB(1)]` | `overrideBubble(1)`: S3 → BPU 내부 **S1+S2** in-flight kill |
+> | `[F]` | IFU stage flush (`f*_flush_from_bpu`) |
+> | ~~취소선~~ | 해당 사이클에 kill/discard된 항목 |
 
-```mermaid
-sequenceDiagram
-  participant BPU as Predictor (BPU)
-  participant FTQ as Ftq
-  participant IFU as NewIFU
+---
 
-  Note over BPU: Cycle 1 — S1 예측 (FauFTB)
-  BPU->>FTQ: [C1] bpu_to_ftq (s1 pred, target_A)
+### B-1: S2 Only Override — Main FTB가 FauFTB 예측 수정
 
-  Note over BPU: Cycle 2 — S2 예측 (Main FTB)
-  BPU->>BPU: [C2] s2_redirect 감지: target_B ≠ target_A
-  BPU->>FTQ: [C2] bpu_to_ftq (s2 pred, target_B, hasRedirect=true)
-  FTQ-->>IFU: [C2] flushFromBpu.s2.valid (FtqPtr 기준 flush)
+> FauFTB: tgt_A · Main FTB: tgt_B (≠ A) · S3: tgt_B 동의 → 최종 **tgt_B**
+> 대표 케이스: FauFTB miss (순차 fall-through) 또는 방향 오예측 → FTB hit으로 보정
 
-  Note over IFU: Cycle 2 — IFU F0 flush
-  IFU->>IFU: [C2] f0_flush_from_bpu = shouldFlushByStage2(f0_ftq_req.ftqIdx)
-  IFU->>IFU: [C2] f1_flush → f2_flush (연쇄)
+| 컴포넌트 | C0 | C1 | C2 | C3 | C4 |
+|:---|:---|:---|:---|:---|:---|
+| **BPU S0** | PC_A 진입 | tgt_A 추측 진입 | **★ tgt_B 재진입** (s2_pred win) | tgt_B 다음 | … |
+| **BPU S1** (FauFTB) | — | PC_A → **tgt_A** | ~~seq pred~~ `[OB(0)]` | PC_B → **tgt_B′** | … |
+| **BPU S2** (Main FTB) | — | — | PC_A → **tgt_B** `★ s2_redir` | — | PC_B |
+| **BPU S3** (TAGE·SC) | — | — | — | PC_A → tgt_B `✓` | — |
+| FTQ **bpuPtr** | X | X+1 | X+1 유지 (OB kill로 미증가) | X+2 | … |
+| FTQ **ifuPtr** | — | X 전송 | **← X 롤백** (`flushFromBpu.s2`) | X 재전송 | X+1 |
+| FTQ **entry[X].tgt** | — | tgt_A 기록 | **tgt_B 덮어쓰기** | — | — |
+| **IFU F0** | — | PC_A req | `[F]` shouldFlushByStage2 | **PC_B req** | … |
+| **IFU F1** | — | — | PC_A `[F]` | — | PC_B |
 
-  Note over BPU,FTQ: Cycle 3 — S3 예측 (TAGE+SC+ITTAGE+RAS)
-  BPU->>BPU: [C3] s3_redirect 감지: target_C ≠ target_B
-  BPU->>FTQ: [C3] bpu_to_ftq (s3 pred, target_C, hasRedirect=true)
-  FTQ-->>IFU: [C3] flushFromBpu.s3.valid
-  IFU->>IFU: [C3] f0_flush_from_bpu → 파이프 무효화
+> IFU는 PC_A를 F1까지 진행 후 C2에서 한 번 flush. C3에서 PC_B(=tgt_B)로 재시작.
 
-  Note over BPU,FTQ: 이후 — 새 target_C로 정상 fetch 재개
-  BPU->>FTQ: [C4] bpu_to_ftq (s1 pred, target_C 기반 다음 PC)
-```
+---
+
+### B-2: S3 Only Override — TAGE·ITTAGE·RAS가 FauFTB·FTB 동시 수정
+
+> FauFTB·FTB 모두 tgt_A 동의 · S3만 tgt_C (≠ A) 발견 → 최종 **tgt_C**
+> 대표 케이스: jalr 간접 분기 ITTAGE 보정 · ret 복귀 주소 RAS 보정 · TAGE·SC 방향 반전
+
+| 컴포넌트 | C0 | C1 | C2 | C3 | C4 | C5 |
+|:---|:---|:---|:---|:---|:---|:---|
+| **BPU S0** | PC_A 진입 | tgt_A | tgt_A_seq | **★ tgt_C 재진입** (s3_pred win) | tgt_C 다음 | … |
+| **BPU S1** (FauFTB) | — | PC_A → **tgt_A** | tgt_A_blk → tgt_A2 | ~~tgt_A_seq~~ `[OB(1)]` | PC_C → **tgt_C′** | … |
+| **BPU S2** (Main FTB) | — | — | PC_A → tgt_A `✓` | ~~tgt_A_blk~~ `[OB(1)]` | — | PC_C |
+| **BPU S3** (TAGE·SC·ITTAGE·RAS) | — | — | — | PC_A → **tgt_C** `★ s3_redir` | — | — |
+| FTQ **bpuPtr** | X | X+1 | X+2 | **← X+1 롤백** | X+2 | … |
+| FTQ **ifuPtr** | — | X 전송 | X+1 전송 | **← X 롤백** (`flushFromBpu.s3`) | X 재전송 | X+1 |
+| FTQ **entry[X].tgt** | — | tgt_A 기록 | — | **tgt_C 덮어쓰기** | — | — |
+| FTQ **entry[X+1]** | — | — | tgt_A2 기록 | **폐기** | — | — |
+| **IFU F0** | — | PC_A req | tgt_A_blk req | `[F]` shouldFlushByStage3 | **PC_C req** | … |
+| **IFU F1** | — | — | PC_A | tgt_A_blk `[F]` | — | PC_C |
+| **IFU F2** | — | — | — | PC_A `[F]` | — | — |
+
+> C2에는 flush 없이 IFU가 F2까지 정상 진행. S3 redirect(C3)에서 F0·F1·F2 전부 flush +
+> 투기적으로 쌓인 FTQ entry[X+1]도 bpuPtr 롤백으로 동시 폐기.
+
+---
+
+### B-3: Cascaded Override — S2가 S1 수정, S3가 S2 추가 수정
+
+> FauFTB: tgt_A → FTB: tgt_B (`★ s2_redir`) → TAGE·ITTAGE·RAS: tgt_C (`★ s3_redir`) 연속 발생
+> 동일 fetch 블록(PC_A)에 대해 3단계 모두 다른 결론. `selectedResp` S3 최고 우선 → 최종 **tgt_C**
+
+| 컴포넌트 | C0 | C1 | C2 | C3 | C4 |
+|:---|:---|:---|:---|:---|:---|
+| **BPU S0** | PC_A 진입 | tgt_A | **★ tgt_B 재진입** (s2) | **★★ tgt_C 재진입** (s3) | tgt_C 다음 |
+| **BPU S1** (FauFTB) | — | PC_A → **tgt_A** | ~~seq pred~~ `[OB(0)]` | ~~PC_B pred~~ `[OB(1)]` | PC_C → **tgt_C′** |
+| **BPU S2** (Main FTB) | — | — | PC_A → **tgt_B** `★ s2_redir` | (empty) | PC_C |
+| **BPU S3** (TAGE·SC·ITTAGE·RAS) | — | — | — | PC_A → **tgt_C** `★ s3_redir` | — |
+| FTQ **bpuPtr** | X | X+1 | X+1 유지 | X+1 유지 | X+2 |
+| FTQ **ifuPtr** | — | X 전송 | **← X 롤백** (s2) | X 유지 (s3 재확인) | X 재전송 |
+| FTQ **entry[X].tgt** | — | tgt_A 기록 | **tgt_B 덮어쓰기** | **tgt_C 덮어쓰기** | — |
+| **IFU F0** | — | PC_A req | `[F]` (s2) | `[F]` (s3, PC_B req 소거) | **PC_C req** |
+| **IFU F1** | — | — | PC_A `[F]` | — | — |
+
+> C2 → 1차 flush (PC_A F1 소거), C3 → 2차 flush (PC_B F0 시도 소거).
+> entry[X].tgt이 tgt_A → tgt_B → tgt_C 로 두 번 갱신. bpuPtr은 OB kill 덕분에 두 override 내내 X+1 유지.
 
 ---
 

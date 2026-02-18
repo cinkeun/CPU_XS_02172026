@@ -39,168 +39,70 @@ XiangShan Frontend는 BPU(분기 예측) → FTQ(Fetch Target Queue) → IFU(명
 ## 3. Top-Level Block Diagram
 
 ```mermaid
+---
+config:
+  layout: dagre
+---
 flowchart LR
-  CSR["CSR / sfence\n/ tlbCsr"]
-  Backend["Backend\n(ROB/LSU)"]
-
-  subgraph BPU["Predictor (BPU)"]
-    BS0["S0\nPC mux\nHistory gen"]
-    BS1["S1\nFauFTB\n1st prediction"]
-    BS2["S2\nFTB+TAGE-base\ns2_redirect?"]
-    BS3["S3\nTAGE+SC\n+ITTAGE+RAS\ns3_redirect?"]
-    BS0 -->|s0_fire RegEnable| BS1
-    BS1 -->|s1_fire RegEnable| BS2
-    BS2 -->|s2_fire RegEnable| BS3
+ subgraph BPU["Predictor (BPU)"]
+        BS3["S3\nTAGE+SC\n+ITTAGE+RAS\ns3_redirect?"]
+        BS2["S2\nFTB+TAGE-base\ns2_redirect?"]
+        BS1["S1\nFauFTB\n1st prediction"]
+        BS0["S0\nPC mux\nHistory gen"]
   end
-
-  subgraph FTQ["Ftq"]
-    FQ_BPU["bpuPtr\nenq from BPU"]
-    FQ_IFU["ifuPtr\ndeq to IFU"]
-    FQ_COMM["commPtr\ncommit from ROB"]
-    FQ_BPU --> FQ_IFU --> FQ_COMM
+ subgraph FTQ["Ftq"]
+        FQ_COMM["commPtr\ncommit from ROB"]
+        FQ_IFU["ifuPtr\ndeq to IFU"]
+        FQ_BPU["bpuPtr\nenq from BPU"]
   end
-
-  subgraph IFU["NewIFU"]
-    F0["F0\nfetch req\nto ICache"]
-    F1["F1\nPC calc\nf1_valid RegInit"]
-    F2["F2\nICache resp\nPredecode\nf2_valid RegInit"]
-    F3["F3\nRVC expand\nPredChecker\nf3_valid RegInit"]
-    F0 -->|f0_fire RegEnable| F1
-    F1 -->|f1_fire RegEnable| F2
-    F2 -->|f2_fire ICache resp| F3
+ subgraph IFU["NewIFU"]
+        F3["F3\nRVC expand\nPredChecker\nf3_valid RegInit"]
+        F2["F2\nICache resp\nPredecode\nf2_valid RegInit"]
+        F1["F1\nPC calc\nf1_valid RegInit"]
+        F0["F0\nfetch req\nto ICache"]
   end
-
-  subgraph ICache["ICache"]
-    IC_MAIN["MainPipe\n(S0/S1/S2)"]
-    IC_MISS["MissHandler"]
-    IC_PREFETCH["Prefetcher"]
+ subgraph ICache["ICache"]
+        IC_PREFETCH["Prefetcher"]
+        IC_MISS["MissHandler"]
+        IC_MAIN["MainPipe\n(S0/S1/S2)"]
+  end
+ subgraph TLB_PMP["iTLB / PMP"]
+        PMP["PMP\n+Checker"]
+        ITLB["TLB\nPortNum+1 ports"]
+  end
+ subgraph IBuf["IBuffer"]
+        IBOUT["Output Reg\nDecodeWidth"]
+        IBK["IBufNBank 뱅크\n(Banked FIFO)"]
+  end
+    BS0 -- s0_fire RegEnable --> BS1
+    BS1 -- s1_fire RegEnable --> BS2
+    BS2 -- s2_fire RegEnable --> BS3
+    FQ_BPU --> FQ_IFU
+    FQ_IFU --> FQ_COMM
+    F0 -- f0_fire RegEnable --> F1
+    F1 -- f1_fire RegEnable --> F2
+    F2 -- f2_fire ICache resp --> F3
     IC_MAIN --> IC_MISS
-  end
-
-  subgraph TLB_PMP["iTLB / PMP"]
-    ITLB["TLB\nPortNum+1 ports"]
-    PMP["PMP\n+Checker"]
-  end
-
-  subgraph IBuf["IBuffer"]
-    IBK["IBufNBank 뱅크\n(Banked FIFO)"]
-    IBOUT["Output Reg\nDecodeWidth"]
     IBK --> IBOUT
-  end
-
-  CSR -.->|sfence/tlbCsr/csrCtrl| BPU
-  CSR -.->|sfence/tlbCsr| TLB_PMP
-
-  BS3 -->|bpu_to_ftq Decoupled| FTQ
-  FTQ -->|toBpu redirect/update Valid| BPU
-  FTQ -->|toIfu Decoupled req| IFU
-  FTQ -->|toICache Decoupled req| ICache
-  FTQ -->|toPrefetch Decoupled| IC_PREFETCH
-
-  ICache -->|fetch.resp Valid| IFU
-  ICache -->|itlb| ITLB
-  ITLB -->|ptw| Backend
-  PMP -.->|pmp resp| ICache
-  PMP -.->|pmp resp| IFU
-
-  F3 -->|toIbuffer Decoupled| IBuf
-  F3 -->|pdWb Valid| FTQ
-  IBuf -->|cfVec DecoupledIO| Backend
-
-  Backend -.->|toFtq.redirect Valid| FTQ
-  Backend -.->|rob_commits| IFU
-  FTQ -.->|icacheFlush| ICache
-  FTQ -.->|flushFromBpu BpuFlushInfo| IFU
-  IFU -.->|mmioCommitRead| FTQ
-```
-
----
-
-## 4. Pipeline Stages by Module
-
-### 4.1 Predictor (BPU) — 3 register stages
-
-| Stage | 이름 | 근거 | 역할 |
-| ----- | ---- | ---- | ---- |
-| S0    | Launch phase | (combinational) | PC mux, folded history gen, predictor input 구성 |
-| S1    | 1st prediction | `RegEnable(s0_pc, s0_fire)` / `s1_valid_dup` | FauFTB 조회, 초기 예측결과 FTQ 전달 |
-| S2    | 2nd prediction | `RegEnable(s1_pc, s1_fire)` / `s2_valid_dup` | 메인 FTB 조회 + TAGE base, s2_redirect 가능 |
-| S3    | Final prediction | `RegEnable(s2_pc, s2_fire)` / `s3_valid_dup` | TAGE+SC+ITTAGE+RAS 결합, s3_redirect 가능 |
-
-`BPU.scala: class Predictor` — `val s1_valid_dup, s2_valid_dup, s3_valid_dup = dup_seq(RegInit(false.B))`
-
-### 4.2 NewIFU — 3 register stages (+ F0 launch phase)
-
-| Stage | 이름 | 근거 | 역할 |
-| ----- | ---- | ---- | ---- |
-| F0    | Launch phase | (combinational) | ICache 요청 생성, fromFtq.req 소비 |
-| F1    | PC calc | `val f1_valid = RegInit(false.B)` | PC/half_snpc/cut_ptr 계산 |
-| F2    | ICache resp | `val f2_valid = RegInit(false.B)` | ICache 응답 수신, predecode 실행, 예외 생성 |
-| F3    | IBuffer enq | `val f3_valid = RegInit(false.B)` | RVC 확장, PredChecker, IBuffer 전송, MMIO 처리 |
-
-`IFU.scala: class NewIFU` — `def numOfStage = 3`
-
-### 4.3 Ftq — 3 포인터 기반 circular queue
-
-| 포인터 | 역할 |
-| ------- | ---- |
-| bpuPtr  | BPU enqueue 위치 |
-| ifuPtr  | IFU dequeue 위치 |
-| commPtr | commit 완료 위치 |
-
-`NewFtq.scala: class FtqPtr` — `CircularQueuePtr[FtqPtr](FtqSize)`
-
-### 4.4 IBuffer — 뱅크드 FIFO, 출력 레지스터 1단
-
-| 구조 | 근거 | 역할 |
-| ---- | ---- | ---- |
-| IBufNBank 뱅크 | `val ibuf = RegInit(VecInit.fill(IBufSize)(...))` | 원형 버퍼, 뱅크별 1엔트리 dequeue |
-| Output Reg | `val outputEntries = RegInit(...)` | DecodeWidth 출력 레지스터 |
-| Bypass path | `val useBypass = enqPtr === deqPtr && decodeCanAccept` | empty 시 enqueue → 즉시 출력 |
-
----
-
-## 5. Flow / Backpressure Control
-
-### 5.1 BPU → FTQ
-
-- **Protocol**: `DecoupledIO(new BpuToFtqBundle)` — `bpu_to_ftq.resp.valid / .ready`
-- **Stall**: FTQ full 시 `ftqFullStall = true` → BPU S3 stall, `s3_ready = false`
-- **flush**: `io.redirect Valid` 수신 시 in-flight S0~S3 무효화
-
-### 5.2 FTQ → IFU
-
-- **Protocol**: `Decoupled(new FetchRequestBundle)` — `fromFtq.req.valid / .ready`
-- `fromFtq.req.ready := f1_ready && io.icacheInter.icacheReady` (IFU.scala:263)
-- **flush**: `backend_redirect` / `wb_redirect` → f0/f1/f2/f3_flush 연쇄 전파
-
-### 5.3 FTQ → ICache
-
-- **Protocol**: `Decoupled(new FtqToICacheRequestBundle)` — `toICache.req`
-- `ftq.io.toICache.req.ready := ifu.io.ftqInter.fromFtq.req.ready && icache.io.fetch.req.ready` (Frontend.scala:203)
-
-### 5.4 IFU → IBuffer
-
-- **Protocol**: `Decoupled(new FetchToIBuffer)` — `toIbuffer`
-- **Stall**: IBuffer full(`allowEnq = false`) → `io.out.ready` deassert → IFU f3 stall
-- `io.icacheStop := !f3_ready` → ICache도 stall
-
-### 5.5 IBuffer → Backend (Decode)
-
-- **Protocol**: `Vec(DecodeWidth, DecoupledIO(new CtrlFlow))`
-- **Stall**: `decodeCanAccept` 입력으로 dequeue 제어
-- **Bypass**: `useBypass = enqPtr === deqPtr && decodeCanAccept` (빈 상태에서 직접 출력)
-- `allowEnq := (IBufSize - PredictWidth).U >= numValidNext` (거의 full 시 enqueue 차단)
-
-### 5.6 Backend redirect → FTQ → 전 모듈 flush
-
-```
-io.backend.toFtq.redirect.valid
-  → needFlush = RegNext(...)
-  → ftq: flush ifuPtr, 예측정보 정정
-  → icacheFlush → ICache 파이프 무효화
-  → ibuffer.io.flush → IBuffer 전체 flush
-  → f0_flush → f1_flush → f2_flush → f3_flush (IFU 전체 flush)
+    CSR["CSR / sfence\n/ tlbCsr"] -. sfence/tlbCsr/csrCtrl .-> BPU
+    CSR -. sfence/tlbCsr .-> TLB_PMP
+    BS3 -- bpu_to_ftq Decoupled --> FTQ
+    FTQ -- toBpu redirect/update Valid --> BPU
+    FTQ -- toIfu Decoupled req --> IFU
+    FTQ -- toICache Decoupled req --> ICache
+    FTQ -- toPrefetch Decoupled --> IC_PREFETCH
+    ICache -- "fetch.resp Valid" --> IFU
+    ICache -- itlb --> ITLB
+    ITLB -- ptw --> Backend["Backend\n(ROB/LSU)"]
+    PMP -. pmp resp .-> ICache & IFU
+    F3 -- toIbuffer Decoupled --> IBuf
+    F3 -- pdWb Valid --> FTQ
+    IBuf -- cfVec DecoupledIO --> Backend
+    Backend -. "toFtq.redirect Valid" .-> FTQ
+    Backend -. rob_commits .-> IFU
+    FTQ -. icacheFlush .-> ICache
+    FTQ -. flushFromBpu BpuFlushInfo .-> IFU
+    IFU -. mmioCommitRead .-> FTQ
 ```
 
 ### 5.7 BPU 내부 override bubble
