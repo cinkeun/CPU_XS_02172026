@@ -1,0 +1,502 @@
+# scala_analysis_rule.md
+
+> 목적: Scala(Chisel) 기반 RTL/μarch 코드를 읽고, **마이크로아키텍처 관점**에서 블록/모듈 구조, 파이프라인, 인터페이스, 플로우/백프레셔를 **문서 3종 세트**로 일관되게 분석/산출한다.
+
+---
+
+## 0) 기본 원칙 (반드시 준수)
+
+### 0.1 산출물 3종(필수)
+
+아래 3개의 Markdown 파일을 **반드시** 생성한다. `<block_name>`은 분석 대상 상위 블록의 이름이다.
+
+1. **`<block_name>_block_diagram_overview.md`**
+2. **`<block_name>_in/out_seq_diagram.md`**
+3. **`<block_name>_<module_name>_analysis.md`** (하위 모듈별 1개 이상)
+
+산출물 간 상호 참조 시 아래 포맷을 사용한다:
+
+* `→ See [<block_name>_block_diagram_overview.md](./<block_name>_block_diagram_overview.md)` (overview 참조)
+* `→ See [<module_name> analysis](./<block_name>_<module_name>_analysis.md#section)` (모듈 분석 참조)
+* `→ See [Sequence Group A](./<block_name>_in_out_seq_diagram.md#group-a)` (시퀀스 참조)
+
+---
+
+### 0.2 Scala/Chisel에서 "신뢰 가능한 근거"로 삼을 것
+
+#### 모듈 경계
+
+* `class Xxx extends Module`
+* `extends LazyModule`
+* `Module(new Xxx)`
+* `LazyModule(new Xxx)`
+* `val m = Module(...)`
+
+#### 인터페이스
+
+* `IO(new Bundle { ... })`
+* `DecoupledIO`
+* `ValidIO`
+* `Flipped`
+* `Bundle`
+* `Vec`
+* ReadyValid 류
+
+#### 파이프라인 stage 단서
+
+* `RegNext`
+* `RegEnable`
+* `RegInit`
+* `ShiftRegister`
+* `Pipe(...)`
+* `Queue(...)` (Queue는 stage로 취급 가능)
+* `when(io.in.fire)`
+* `io.out.valid := ...`
+* `io.in.ready := ...`
+* `s0/s1/s2`, `stage0/stage1`, `pipe0/pipe1` 네이밍
+
+#### 플로우/백프레셔 단서
+
+* `Decoupled` / `ready` / `valid` / `fire`
+* `Queue` / `SkidBuffer` / `ElasticBuffer` / `Fifo`
+* `flush`, `kill`, `redirect`, `replay`, `stall`, `hold`
+* credit 기반: `credit`, `token`, `decr/incr`, `available`
+
+#### 파라미터/Config 단서
+
+* `case class XxxParams(...)` / `case object XxxKey extends Field[...]`
+* `implicit p: Parameters` / `p(XxxKey)` 참조
+* 모듈 분석 시 주요 파라미터 값과 그것이 구조(way 수, 파이프라인 depth, 큐 depth 등)에 미치는 영향을 표로 정리
+
+> 문서에 쓰는 모든 결론(파이프라인 개수, 방향, 백프레셔 방식)은 위 단서 중 하나 이상으로 **코드 근거**를 붙여 설명한다.
+
+---
+
+### 0.3 분석 깊이 기준
+
+* **기본**: top 모듈에서 2 depth까지 분석
+* 하위 모듈이 단순 util(Queue wrapper, Arbiter, MuxLookup 등)이면 skip하고 overview에 이름만 표기
+* 사용자가 명시적으로 지정한 모듈은 depth 무관하게 분석
+* 분석 대상 모듈이 10개를 초과할 경우, 사용자에게 우선순위를 확인한 뒤 진행
+
+---
+
+### 0.4 Mermaid 규칙 (필수)
+
+* 모든 md 파일에 **렌더링된 그림 + mermaid code**를 같이 넣는다.
+* 노드 텍스트에서 `()` 최소 사용
+* `\n` 줄바꿈은 대괄호 `[]` 안에서만
+* 특수문자 `|`, `<`, `>` 최소화
+* 노드명은 짧게, 상세는 설명 텍스트로
+
+---
+
+## 1) `<block_name>_block_diagram_overview.md` 작성 규칙
+
+### 1.1 목표
+
+* 블록 전체 구조를 한 장으로 이해
+* 세부 블록은 module 단위
+* 화살표 방향 = 데이터 흐름
+* 화살표 라벨 = 인터페이스 이름 + 제어 신호
+* pipeline stage는 모듈 내부 sub-block으로 표시
+* 모듈별 pipeline stage 개수 명확히 표현
+* block level flow/backpressure 설명 포함
+
+---
+
+### 1.2 문서 구조 (템플릿)
+
+#### 1. Block Summary
+
+* 역할 요약 (3줄)
+* 주요 input/output
+* 성능/병목 포인트
+
+#### 2. Key Parameters
+
+| Parameter | Default | 영향 |
+| --------- | ------- | ---- |
+| nWays     | 4       | 캐시 way 수 결정 |
+| nEntries  | 8       | 큐 depth 결정 |
+
+* `case class`/`Field` 기반으로 정리
+
+#### 3. Top-Level Block Diagram (Mermaid + Image)
+
+* 모듈 박스
+* 모듈 내부 pipeline stage
+* 인터페이스 라벨 포함 링크
+
+#### 4. Pipeline Stages by Module
+
+* 모듈별 stage 개수
+* stage 역할
+* stage 경계 근거
+
+#### 5. Flow / Backpressure Control
+
+* Decoupled 여부
+* stall/flush/kill/replay 경로
+* 큐/버퍼 정책
+* credit 기반 설명
+
+#### 6. Error / Exception Paths
+
+* bus error, ECC error 처리 경로
+* exception/interrupt 전파 경로
+* error 발생 시 파이프라인 동작 (flush, replay 등)
+
+#### 7. Timing Hints
+
+* critical path 후보 (큰 mux, multi-way comparator, long chain 등)
+* 타이밍 민감 모듈 메모
+
+#### 8. Open Questions / TODO
+
+---
+
+### 1.3 다이어그램 표현 규칙
+
+* 모듈은 `subgraph <module_name>`
+* stage는 `S0 --> S1`
+* 데이터 forward = 실선
+* 제어/backward = 점선 (`-.->`)
+* 에러/예외 경로 = 굵은 점선 (`=.=>`) 또는 빨간 라벨
+* 화살표 라벨에:
+
+  * interface 이름
+  * protocol
+  * control signal
+
+---
+
+### 1.4 Mermaid 예시
+
+```mermaid
+flowchart LR
+
+  subgraph A["ModuleA"]
+    A0["S0 input"] --> A1["S1 compute"] --> A2["S2 output"]
+  end
+
+  subgraph B["ModuleB"]
+    B0["S0 queue"] --> B1["S1 execute"]
+  end
+
+  A2 -->|req Decoupled| B0
+  B1 -.->|stall| A1
+  B1 -.->|flush| A0
+```
+
+---
+
+## 2) `<block_name>_in/out_seq_diagram.md` 작성 규칙
+
+### 2.1 목표
+
+* input → processing → output 전 과정 표현
+* forward path + backward path 모두 포함
+* 입력 많으면 그룹별로 분리
+
+---
+
+### 2.2 입력 그룹핑 기준
+
+1. 프로토콜 차이 (Decoupled / Valid / Control)
+2. 서로 다른 output 대응 관계
+3. 결과 경로 분기 (hit/miss 등)
+4. 핵심 데이터 경로 우선
+
+---
+
+### 2.3 문서 구조
+
+#### 1. I/O Summary
+
+* 입력 리스트
+* 출력 리스트
+
+#### 2. Sequence Diagram - Group A
+
+* 정상 흐름
+* stall/backpressure
+* flush/kill 분기
+
+#### 3. Sequence Diagram - Group B/C
+
+* 필요시 추가
+
+#### 4. Edge Cases
+
+* flush 중 처리
+* replay
+* ordering
+* bus error / ECC error 수신 시 처리
+* exception / interrupt 전파
+
+---
+
+### 2.4 Sequence 작성 규칙
+
+* participant = module 또는 stage
+* forward `->>`
+* backward `-->>`
+* ready/valid 표시
+* 분기 `alt/else`
+
+---
+
+### 2.5 Cycle 표기 규칙
+
+* `Note over S0,S1: Cycle N` 을 사용하여 사이클 경계를 표시
+* 또는 메시지 라벨에 `[C0]`, `[C1]` 접두사를 사용하여 사이클 번호를 명시
+* 파이프라인 latency가 핵심인 경우 반드시 cycle 표기를 포함
+
+---
+
+### 2.6 Mermaid 예시
+
+```mermaid
+sequenceDiagram
+
+  participant IN as Upstream
+  participant S0 as Block.S0
+  participant S1 as Block.S1
+  participant OUT as Downstream
+
+  Note over S0,S1: Cycle 0
+  IN->>S0: [C0] in.valid
+  S0-->>IN: in.ready
+
+  alt ready=1
+    Note over S0,S1: Cycle 1
+    S0->>S1: [C1] transfer
+    Note over S1,OUT: Cycle 2
+    S1->>OUT: [C2] out.valid
+    OUT-->>S1: out.ready
+  else stall
+    S0-->>IN: stall
+  end
+
+  opt flush
+    OUT-->>S0: flush
+    S0-->>S1: invalidate
+  end
+```
+
+---
+
+## 3) `<block_name>_<module_name>_analysis.md` 작성 규칙
+
+### 3.1 목표
+
+* 하위 모듈 분석
+* interface 표 작성
+* functionality 설명
+* pseudocode 포함
+* flow/backpressure 설명
+
+---
+
+### 3.2 문서 구조
+
+#### 1. Module Summary
+
+* 역할
+* 위치 (→ See overview 링크)
+* pipeline stage 수
+
+#### 2. Key Parameters
+
+| Parameter | Source | Default | 영향 |
+| --------- | ------ | ------- | ---- |
+| nWays     | `p(XxxKey).nWays` | 4 | way 수 결정 |
+
+#### 3. Interfaces (표 형식)
+
+| Port | Dir | Bitwidth | Protocol | Description |
+| ---- | --- | -------- | -------- | ----------- |
+
+---
+
+#### 4. Internal Pipeline / State
+
+* stage 구성
+* 레지스터
+* 큐
+* FSM
+
+#### 5. Functionality
+
+* 데이터 흐름
+* 알고리즘
+
+#### 6. Flow / Backpressure Control
+
+* ready/valid
+* stall 조건
+* flush 조건
+* queue 정책
+
+#### 7. Error / Exception Handling
+
+* 에러 입력 처리 방식
+* 에러 출력/전파 방식
+* 에러 시 파이프라인 동작
+
+#### 8. Timing Hints
+
+* critical path 후보
+* 큰 combinational logic (wide mux, CAM lookup, priority encoder 등)
+* 개선 여지 메모
+
+#### 9. Pseudocode
+
+#### 10. Notes / Assumptions
+
+---
+
+### 3.3 Interface 표 예시
+
+| Port     | Dir | Bitwidth | Protocol  | Description |
+| -------- | --- | -------- | --------- | ----------- |
+| io.req   | in  | bundle   | Decoupled | request     |
+| io.resp  | out | bundle   | Decoupled | response    |
+| io.flush | in  | 1        | Valid     | flush       |
+| io.error | out | 1        | Valid     | ECC/bus error |
+
+---
+
+### 3.4 Pseudocode 작성 규칙
+
+* cycle 기반 또는 fire 기반
+* stall/flush 명시
+* error 경로 명시
+* stage별 작성
+
+예시:
+
+```
+S0:
+  if in.fire:
+    latch
+  if flush:
+    invalidate
+
+S1:
+  if valid and out_ready:
+    compute
+  if error:
+    set error flag, flush pipeline
+
+S2:
+  if valid:
+    output result
+    if error_flag:
+      output error response
+```
+
+---
+
+## 4) 분석 수행 절차
+
+### Step 1: 블록 경계 식별
+
+* top module 찾기
+* IO 목록 정리
+* 주요 파라미터(case class/Field) 수집
+
+### Step 2: 하위 모듈 그래프 생성
+
+* 인스턴스 트리 작성
+* 분석 깊이 기준(0.3)에 따라 분석 대상 확정
+
+### Step 3: 파이프라인 인식
+
+* RegNext / Queue / valid-ready 경계
+
+### Step 4: Flow 정리
+
+* stall / flush / replay
+* error / exception 경로
+
+### Step 5: 3종 문서 생성
+
+* overview → seq → module
+* 문서 간 cross-reference 링크 삽입
+
+---
+
+## 5) 품질 체크리스트
+
+### Overview
+
+* [ ] 모듈 단위 구성
+* [ ] 인터페이스 라벨 존재
+* [ ] pipeline stage 표시
+* [ ] backpressure 설명
+* [ ] 파라미터 표 존재
+* [ ] error/exception 경로 기술
+* [ ] timing hints 기술
+* [ ] module analysis 문서 링크 존재
+
+### Sequence
+
+* [ ] 전체 흐름 표현
+* [ ] backward path 포함
+* [ ] flush/kill 포함
+* [ ] cycle 표기 포함 (파이프라인 latency가 핵심인 경우)
+* [ ] error/exception edge case 포함
+* [ ] overview 및 module analysis 링크 존재
+
+### Module
+
+* [ ] interface 표 존재
+* [ ] pseudocode 존재
+* [ ] flow 설명 존재
+* [ ] 파라미터 표 존재
+* [ ] error handling 섹션 존재
+* [ ] timing hints 존재
+* [ ] overview 링크 존재
+
+---
+
+## 6) 출력 파일 헤더 표준
+
+```
+# <file_name>
+
+- Block: <block_name>
+- Module: <module_name or N/A>
+- Source: <scala paths>
+- Protocols: Decoupled/Valid/Credit
+- Key Params: <주요 파라미터 나열>
+- Last updated: YYYY-MM-DD
+```
+
+---
+
+## 7) 용어 표준
+
+* fire = valid && ready
+* forward path = data 흐름
+* backward path = flow control
+* flush/kill = in-flight 무효화
+* stall = 진행 중단
+* error path = 에러/예외 전파 경로
+* critical path = 타이밍 상 가장 긴 combinational 경로
+
+---
+
+## 8) 코드 근거 인용 포맷
+
+* `Foo.scala: class Bar`
+* `RegNext used between s0->s1`
+* `Queue(depth=4) on req path`
+* `p(XxxKey).nWays determines way count`
+* `io.error output driven by ECC check logic`
+
+---
+
+### END
