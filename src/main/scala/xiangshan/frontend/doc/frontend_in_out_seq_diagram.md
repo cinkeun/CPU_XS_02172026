@@ -90,88 +90,158 @@ sequenceDiagram
 
 ---
 
-## 3. Pipeline Diagram — Group B: BPU Override (BTB 간 예측 불일치 → Redirect)
+## 3. Sequence Diagram — Group B: BPU S3 Override (s3_override → FTQ entry 갱신 + IFU flush)
 
-> BPU 3단계 파이프라인에서 후속 stage가 **동일한 fetch 블록(PC_A, ftq_idx=X)**에 대해 더 정확한 예측을 내리면
-> FTQ entry의 target을 갱신하고, 이미 전송된 IFU 요청을 flush 후 재시작한다.
+> **실제 아키텍처 (코드 근거: `bpu/Bpu.scala`, `ftq/Ftq.scala`):**
 >
-> 우선순위 (`selectedResp`): **S3 redirect > S2 redirect > S1**
->
-> | 기호 | 의미 |
-> |:---|:---|
-> | `★` | redirect 발생 (hasRedirect=true) |
-> | `✓` | 상위 stage와 동일 예측 — redirect 없음 |
-> | `[OB(0)]` | `overrideBubble(0)`: S2 → BPU 내부 **S1** in-flight kill |
-> | `[OB(1)]` | `overrideBubble(1)`: S3 → BPU 내부 **S1+S2** in-flight kill |
-> | `[F]` | IFU stage flush (`f*_flush_from_bpu`) |
-> | ~~취소선~~ | 해당 사이클에 kill/discard된 항목 |
+> - BPU 내부에는 S1/S2/S3 3단 파이프라인이 있으나, **FTQ에 전달되는 override는 S3에서만 발생**
+> - S2 flush는 BPU 내부(`s2_flush := s3_flush || s3_override`)에서만 처리
+>   (TODO comment: "wait for Ifu/ICache to remove bpu s2 flush" — `Ftq.scala`)
+> - S3 override 조건: `s3_override := s3_valid && !(s3_prediction === s3_s1Prediction)`
+>   → S3의 최종 예측이 동일 PC_A에 대한 S1 초기 예측과 다를 때 발생
+> - **prediction.ready 비의존**: `bpuS3Redirect = prediction.valid && s3Override` — FTQ full이어도 실행
+
+### FTQ 인덱스 추적 (s3FtqPtr)
+
+| 단계 | 코드 근거 | 설명 |
+|------|-----------|------|
+| S1 fire 시 | `s2_ftqPtr = RegEnable(io.fromFtq.bpuPtr, s1_fire)` | S1 fire 시점의 bpuPtr를 s2에 래치 |
+| S2 fire 시 | `s3_ftqPtr = RegEnable(s2_ftqPtr, s2_fire)` | s2_ftqPtr를 s3에 전달 |
+| S3 시점 | `io.toFtq.s3FtqPtr := s3_ftqPtr` | FTQ에 override 대상 entry 인덱스 전달 |
+| override 실행 | `predictionPtr = s3Override ? s3FtqPtr : bpuPtr(0)` | entryQueue(s3FtqPtr) 갱신 |
+| bpuPtr 롤백 | `when(s3Override) { bpuPtr := s3FtqPtr + 1 }` | FTQ enqueue 포인터를 override entry 다음으로 이동 |
+
+### FTQ Override 동작 요약
+
+| 조건 | 동작 | 코드 근거 |
+|------|------|-----------|
+| prediction.fire (s1, not s3Override) | entryQueue(bpuPtr) 신규 기록, bpuPtr+1 | `prediction.fire` |
+| s3Override=1 | entryQueue(s3FtqPtr) 갱신(덮어쓰기), bpuPtr := s3FtqPtr+1 | `bpuS3Redirect`, `predictionPtr` |
+| ifuPtr >= s3FtqPtr | ifuPtr := s3FtqPtr (롤백) | `when(ifuPtr >= ftqIdx)` |
+| pfPtr >= s3FtqPtr | pfPtr := s3FtqPtr (롤백) | `when(pfPtr >= ftqIdx)` |
+| IFU stage idx >= s3FtqPtr | shouldFlushByStage3 = true → flush | `!isAfter(s3FtqPtr, idxToFlush)` |
+
+### nextStartVAddr Bypass 경우
+
+| bpuPtr 위치 | nextStartVAddr 소스 | 코드 근거 |
+|-------------|---------------------|-----------|
+| bpuPtr(0) == ifuPtr(0) | prediction.bits.target (bypass-1) | `bpuPtr(0) === ifuPtr(0)` |
+| bpuPtr(0) == ifuPtr(1) | prediction.bits.startPc (bypass-2, = tgt_C) | `bpuPtr(0) === ifuPtr(1)` |
+| 그 외 | entryQueue(ifuPtr(1)).startPc (SRAM) | default MuxCase |
 
 ---
 
-### B-1: S2 Only Override — Main FTB가 FauFTB 예측 수정
+### B-1: Standard S3 Override (ifuPtr > s3FtqPtr — IFU가 이미 앞선 상태)
 
-> FauFTB: tgt_A · Main FTB: tgt_B (≠ A) · S3: tgt_B 동의 → 최종 **tgt_B**
-> 대표 케이스: FauFTB miss (순차 fall-through) 또는 방향 오예측 → FTB hit으로 보정
+> S1에서 idx=X enq → IFU가 idx=X 이상 처리 중 → S3에서 s3_override=1 (tgt_C ≠ tgt_A)
+> → entryQueue(X) 갱신 + ifuPtr 롤백 + IFU flush + tgt_C 기준 재시작
 
-| 컴포넌트 | C0 | C1 | C2 | C3 | C4 |
-|:---|:---|:---|:---|:---|:---|
-| **BPU S0** | PC_A 진입 | tgt_A 추측 진입 | **★ tgt_B 재진입** (s2_pred win) | tgt_B 다음 | … |
-| **BPU S1** (FauFTB) | — | PC_A → **tgt_A** | ~~seq pred~~ `[OB(0)]` | PC_B → **tgt_B′** | … |
-| **BPU S2** (Main FTB) | — | — | PC_A → **tgt_B** `★ s2_redir` | — | PC_B |
-| **BPU S3** (TAGE·SC) | — | — | — | PC_A → tgt_B `✓` | — |
-| FTQ **bpuPtr** | X | X+1 | X+1 유지 (OB kill로 미증가) | X+2 | … |
-| FTQ **ifuPtr** | — | X 전송 | **← X 롤백** (`flushFromBpu.s2`) | X 재전송 | X+1 |
-| FTQ **entry[X].tgt** | — | tgt_A 기록 | **tgt_B 덮어쓰기** | — | — |
-| **IFU F0** | — | PC_A req | `[F]` shouldFlushByStage2 | **PC_B req** | … |
-| **IFU F1** | — | — | PC_A `[F]` | — | PC_B |
+```mermaid
+sequenceDiagram
+  participant BPU as Predictor (BPU)
+  participant FTQ as Ftq
+  participant IFU as Ifu
 
-> IFU는 PC_A를 F1까지 진행 후 C2에서 한 번 flush. C3에서 PC_B(=tgt_B)로 재시작.
+  Note over BPU,FTQ: Cycle 0 — S1 fire: PC_A → FTQ idx=X enq
+  BPU->>FTQ: [C0] prediction.valid=1, s3Override=0, startPc=PC_A, tgt=tgt_A
+  FTQ-->>BPU: [C0] prediction.ready=1
+  FTQ->>FTQ: [C0] entryQueue(X).startPc:=PC_A, bpuPtr:=X+1
+  FTQ->>IFU: [C0] toIfu.req (idx=X, startAddr=PC_A)
 
----
+  Note over BPU,IFU: Cycle 1 — S1 PC_A+blk → idx=X+1 enq, IFU idx=X 처리 중
+  BPU->>FTQ: [C1] prediction.valid=1, s3Override=0, startPc=PC_A+blk, tgt=tgt_A2
+  FTQ->>FTQ: [C1] entryQueue(X+1).startPc:=PC_A+blk, bpuPtr:=X+2
+  FTQ->>IFU: [C1] toIfu.req (idx=X+1, startAddr=PC_A+blk)
+  Note over IFU: ifuPtr=X+1, bpuPtr=X+2
 
-### B-2: S3 Only Override — TAGE·ITTAGE·RAS가 FauFTB·FTB 동시 수정
+  Note over BPU,IFU: Cycle 2 — S3 fire: s3_override=1, s3FtqPtr=X
+  BPU->>BPU: [C2] S3: s3_prediction(PC_A)=tgt_C ≠ s1_prediction(PC_A)=tgt_A → s3_override=1
+  BPU->>BPU: [C2] s2_flush:=1 (BPU 내부 S1+S2 in-flight kill), s0_startPc:=tgt_C
+  BPU->>FTQ: [C2] prediction.valid=1, s3Override=1, s3FtqPtr=X, startPc=PC_A, tgt=tgt_C
+  FTQ->>FTQ: [C2] bpuS3Redirect=1 → entryQueue(X) 갱신: tgt:=tgt_C
+  FTQ->>FTQ: [C2] bpuPtr := X+1 (entry X+1 폐기)
+  FTQ->>FTQ: [C2] ifuPtr=X+1 >= s3FtqPtr=X → ifuPtr := X (롤백)
+  FTQ->>FTQ: [C2] pfPtr >= X → pfPtr := X (롤백)
+  FTQ->>IFU: [C2] flushFromBpu.s3.valid=1, bits=X
+  IFU->>IFU: [C2] shouldFlushByStage3(idx>=X) → s0/s1_flush=1, 모든 in-flight 무효화
 
-> FauFTB·FTB 모두 tgt_A 동의 · S3만 tgt_C (≠ A) 발견 → 최종 **tgt_C**
-> 대표 케이스: jalr 간접 분기 ITTAGE 보정 · ret 복귀 주소 RAS 보정 · TAGE·SC 방향 반전
-
-| 컴포넌트 | C0 | C1 | C2 | C3 | C4 | C5 |
-|:---|:---|:---|:---|:---|:---|:---|
-| **BPU S0** | PC_A 진입 | tgt_A | tgt_A_seq | **★ tgt_C 재진입** (s3_pred win) | tgt_C 다음 | … |
-| **BPU S1** (FauFTB) | — | PC_A → **tgt_A** | tgt_A_blk → tgt_A2 | ~~tgt_A_seq~~ `[OB(1)]` | PC_C → **tgt_C′** | … |
-| **BPU S2** (Main FTB) | — | — | PC_A → tgt_A `✓` | ~~tgt_A_blk~~ `[OB(1)]` | — | PC_C |
-| **BPU S3** (TAGE·SC·ITTAGE·RAS) | — | — | — | PC_A → **tgt_C** `★ s3_redir` | — | — |
-| FTQ **bpuPtr** | X | X+1 | X+2 | **← X+1 롤백** | X+2 | … |
-| FTQ **ifuPtr** | — | X 전송 | X+1 전송 | **← X 롤백** (`flushFromBpu.s3`) | X 재전송 | X+1 |
-| FTQ **entry[X].tgt** | — | tgt_A 기록 | — | **tgt_C 덮어쓰기** | — | — |
-| FTQ **entry[X+1]** | — | — | tgt_A2 기록 | **폐기** | — | — |
-| **IFU F0** | — | PC_A req | tgt_A_blk req | `[F]` shouldFlushByStage3 | **PC_C req** | … |
-| **IFU F1** | — | — | PC_A | tgt_A_blk `[F]` | — | PC_C |
-| **IFU F2** | — | — | — | PC_A `[F]` | — | — |
-
-> C2에는 flush 없이 IFU가 F2까지 정상 진행. S3 redirect(C3)에서 F0·F1·F2 전부 flush +
-> 투기적으로 쌓인 FTQ entry[X+1]도 bpuPtr 롤백으로 동시 폐기.
+  Note over FTQ,IFU: Cycle 3 — IFU 재요청 (bypass-2 적용)
+  Note over FTQ: bpuPtr=X+1, ifuPtr=X → bpuPtr(0)==ifuPtr(1): bypass-2
+  FTQ->>IFU: [C3] toIfu.req (idx=X, startAddr=PC_A)
+  Note over FTQ: nextStartVAddr = prediction.bits.startPc = tgt_C (bypass-2, SRAM 미사용)
+  IFU-->>FTQ: [C3] toIfu.req.ready
+```
 
 ---
 
-### B-3: Cascaded Override — S2가 S1 수정, S3가 S2 추가 수정
+### B-2: Early S3 Override (ifuPtr <= s3FtqPtr — IFU가 아직 뒤처진 상태)
 
-> FauFTB: tgt_A → FTB: tgt_B (`★ s2_redir`) → TAGE·ITTAGE·RAS: tgt_C (`★ s3_redir`) 연속 발생
-> 동일 fetch 블록(PC_A)에 대해 3단계 모두 다른 결론. `selectedResp` S3 최고 우선 → 최종 **tgt_C**
+> FTQ back-pressure 등으로 IFU stall → ifuPtr < s3FtqPtr
+> → ifuPtr 롤백 불필요, entryQueue(s3FtqPtr)만 갱신, IFU flush 범위 없음
 
-| 컴포넌트 | C0 | C1 | C2 | C3 | C4 |
-|:---|:---|:---|:---|:---|:---|
-| **BPU S0** | PC_A 진입 | tgt_A | **★ tgt_B 재진입** (s2) | **★★ tgt_C 재진입** (s3) | tgt_C 다음 |
-| **BPU S1** (FauFTB) | — | PC_A → **tgt_A** | ~~seq pred~~ `[OB(0)]` | ~~PC_B pred~~ `[OB(1)]` | PC_C → **tgt_C′** |
-| **BPU S2** (Main FTB) | — | — | PC_A → **tgt_B** `★ s2_redir` | (empty) | PC_C |
-| **BPU S3** (TAGE·SC·ITTAGE·RAS) | — | — | — | PC_A → **tgt_C** `★ s3_redir` | — |
-| FTQ **bpuPtr** | X | X+1 | X+1 유지 | X+1 유지 | X+2 |
-| FTQ **ifuPtr** | — | X 전송 | **← X 롤백** (s2) | X 유지 (s3 재확인) | X 재전송 |
-| FTQ **entry[X].tgt** | — | tgt_A 기록 | **tgt_B 덮어쓰기** | **tgt_C 덮어쓰기** | — |
-| **IFU F0** | — | PC_A req | `[F]` (s2) | `[F]` (s3, PC_B req 소거) | **PC_C req** |
-| **IFU F1** | — | — | PC_A `[F]` | — | — |
+```mermaid
+sequenceDiagram
+  participant BPU as Predictor (BPU)
+  participant FTQ as Ftq
+  participant IFU as Ifu
 
-> C2 → 1차 flush (PC_A F1 소거), C3 → 2차 flush (PC_B F0 시도 소거).
-> entry[X].tgt이 tgt_A → tgt_B → tgt_C 로 두 번 갱신. bpuPtr은 OB kill 덕분에 두 override 내내 X+1 유지.
+  Note over BPU,IFU: Cycle 0 — S1 fire: PC_A → idx=X enq, IFU stall (ifuPtr=X-1)
+  BPU->>FTQ: [C0] prediction.valid=1, s3Override=0, startPc=PC_A, tgt=tgt_A
+  FTQ-->>BPU: [C0] prediction.ready=1
+  FTQ->>FTQ: [C0] entryQueue(X).startPc:=PC_A, bpuPtr:=X+1
+  Note over IFU: IFU stall: ifuPtr=X-1 (FTQ→IFU 요청 pending 또는 미전송)
+
+  Note over BPU: Cycle 1 — S2 fire: BPU 내부 처리
+  BPU->>BPU: [C1] S2: prediction 계산 중, s3_override 준비
+
+  Note over BPU,IFU: Cycle 2 — S3 fire: s3_override=1, ifuPtr < s3FtqPtr=X
+  BPU->>BPU: [C2] S3: s3_prediction(PC_A)=tgt_C ≠ s1_prediction=tgt_A → s3_override=1
+  BPU->>FTQ: [C2] prediction.valid=1, s3Override=1, s3FtqPtr=X, tgt=tgt_C
+  FTQ->>FTQ: [C2] bpuS3Redirect=1 → entryQueue(X): tgt:=tgt_C
+  FTQ->>FTQ: [C2] bpuPtr := X+1
+  Note over FTQ: ifuPtr=X-1 < s3FtqPtr=X → ifuPtr 롤백 없음
+  FTQ->>IFU: [C2] flushFromBpu.s3.valid=1, bits=X
+  IFU->>IFU: [C2] shouldFlushByStage3(idx=X-1): !isAfter(X, X-1)=false → flush 없음
+  Note over IFU: in-flight fetch idx=X-1 보존 (s3FtqPtr=X보다 이전 entry)
+
+  Note over FTQ,IFU: Cycle 3 — IFU, 갱신된 tgt_C로 idx=X 정상 요청
+  FTQ->>IFU: [C3] toIfu.req (idx=X, startAddr=PC_A)
+  Note over FTQ: nextStartVAddr = entryQueue(X).startPc (SRAM, 이미 tgt_C로 갱신됨)
+  IFU-->>FTQ: [C3] toIfu.req.ready
+```
+
+---
+
+### B-3: Back-pressure S3 Override (prediction.ready=0 — override는 독립 실행)
+
+> FTQ full → prediction.ready=0 (신규 S1 enq 불가)
+> 그러나 s3_override는 `bpuS3Redirect` 경로로 prediction.ready와 무관하게 실행
+
+```mermaid
+sequenceDiagram
+  participant BPU as Predictor (BPU)
+  participant FTQ as Ftq
+  participant IFU as Ifu
+
+  Note over BPU,FTQ: Cycle 0 — FTQ full: prediction.ready=0
+  BPU->>FTQ: [C0] prediction.valid=1, s3Override=0 (신규 S1 시도)
+  FTQ-->>BPU: [C0] prediction.ready=0 (FTQ full: bpuPtr - deqPtr >= FtqSize)
+  Note over BPU: s1_fire=0 (stall) — 단, 이미 S3에 래치된 PC_A에 대한 s3_override 준비됨
+
+  Note over BPU,IFU: Cycle 1 — S3 override 발생 (prediction.ready=0 상태에서도 실행)
+  BPU->>BPU: [C1] S3: s3_prediction(PC_A)=tgt_C ≠ s1_prediction=tgt_A → s3_override=1
+  BPU->>FTQ: [C1] prediction.valid=1, s3Override=1, s3FtqPtr=X, tgt=tgt_C
+  Note over FTQ: bpuS3Redirect = prediction.valid && s3Override = 1 (ready 비의존)
+  FTQ->>FTQ: [C1] bpuS3Redirect=1 → entryQueue(X): tgt:=tgt_C (prediction.fire 무관)
+  FTQ->>FTQ: [C1] bpuPtr := X+1
+  FTQ->>FTQ: [C1] ifuPtr >= X → ifuPtr := X (롤백)
+  FTQ->>IFU: [C1] flushFromBpu.s3.valid=1, bits=X → IFU flush
+
+  Note over BPU,FTQ: Cycle 2 — FTQ deq 후 prediction.ready=1 복구
+  FTQ-->>BPU: [C2] prediction.ready=1 (FTQ slot 확보)
+  BPU->>FTQ: [C2] prediction.valid=1, s3Override=0, startPc=tgt_C (신규 S1)
+  FTQ->>IFU: [C2] toIfu.req (idx=X, startAddr=PC_A, nextStartVAddr=tgt_C)
+```
 
 ---
 

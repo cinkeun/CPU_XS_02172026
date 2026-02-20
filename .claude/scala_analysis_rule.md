@@ -1,5 +1,8 @@
 # scala_analysis_rule.md
 
+> 최우선 원칙: 모든 분석은 반드시 **code-based only**로 수행한다.  
+> `web-search` 결과나 사전 지식(기억 기반 정보)에 의존한 추론/서술은 금지한다.
+
 > 목적: Scala(Chisel) 기반 RTL/μarch 코드를 읽고, **마이크로아키텍처 관점**에서 블록/모듈 구조, 파이프라인, 인터페이스, 플로우/백프레셔를 **문서 3종 세트**로 일관되게 분석/산출한다.
 
 ---
@@ -88,6 +91,17 @@
 * `\n` 줄바꿈은 대괄호 `[]` 안에서만
 * 특수문자 `|`, `<`, `>` 최소화
 * 노드명은 짧게, 상세는 설명 텍스트로
+
+---
+
+### 0.5 Memory 분석 규칙 (해당 시 필수)
+
+Memory 관련 모듈을 분석할 때는 아래 항목을 반드시 문서화한다.
+
+* memory spec: `depth`, `width`, `number of banks`, `number of read ports`, `number of write ports`
+* memory contents: 각 field별 `size(bit)`와 `description`
+* multi-port 또는 bank conflict가 있으면 arbitration/충돌 처리 규칙 명시
+* 위 항목은 코드 선언(`SyncReadMem`, `SRAMTemplate`, `Vec`, port IO 정의) 기반 근거와 함께 작성
 
 ---
 
@@ -249,6 +263,8 @@ flowchart LR
 
 ### 2.5 Cycle 표기 규칙
 
+* cycle-based sequence diagram은 **x축=cycle, y축=unit/module(participant)** 기준으로 작성한다.
+* 각 cycle에서 어떤 behavior가 발생하는지(transfer, stall, flush, replay, ready/valid 상태)를 반드시 명시한다.
 * `Note over S0,S1: Cycle N` 을 사용하여 사이클 경계를 표시
 * 또는 메시지 라벨에 `[C0]`, `[C1]` 접두사를 사용하여 사이클 번호를 명시
 * 파이프라인 latency가 핵심인 경우 반드시 cycle 표기를 포함
@@ -320,40 +336,62 @@ sequenceDiagram
 
 ---
 
-#### 4. Internal Pipeline / State
+#### 4. Memory Organization (해당 시 필수)
+
+* memory spec 표 작성: depth / width / banks / read ports / write ports
+* memory contents 표 작성: field별 size(bit) / description
+* bank/port 충돌 처리 및 우선순위 규칙
+
+Memory spec 표 예시:
+
+| Memory | Depth | Width(bit) | Banks | Read Ports | Write Ports |
+| ------ | ----- | ---------- | ----- | ---------- | ----------- |
+| metaMem | 256 | 64 | 4 | 2 | 1 |
+
+Memory contents 표 예시:
+
+| Memory | Field | Size(bit) | Description |
+| ------ | ----- | --------- | ----------- |
+| metaMem | tag | 20 | set/tag 비교용 태그 |
+| metaMem | valid | 1 | 엔트리 유효 비트 |
+| metaMem | target | 39 | 예측 타겟 주소 |
+
+---
+
+#### 5. Internal Pipeline / State
 
 * stage 구성
 * 레지스터
 * 큐
 * FSM
 
-#### 5. Functionality
+#### 6. Functionality
 
 * 데이터 흐름
 * 알고리즘
 
-#### 6. Flow / Backpressure Control
+#### 7. Flow / Backpressure Control
 
 * ready/valid
 * stall 조건
 * flush 조건
 * queue 정책
 
-#### 7. Error / Exception Handling
+#### 8. Error / Exception Handling
 
 * 에러 입력 처리 방식
 * 에러 출력/전파 방식
 * 에러 시 파이프라인 동작
 
-#### 8. Timing Hints
+#### 9. Timing Hints
 
 * critical path 후보
 * 큰 combinational logic (wide mux, CAM lookup, priority encoder 등)
 * 개선 여지 메모
 
-#### 9. Pseudocode
+#### 10. Pseudocode
 
-#### 10. Notes / Assumptions
+#### 11. Notes / Assumptions
 
 ---
 
@@ -446,6 +484,8 @@ S2:
 * [ ] 전체 흐름 표현
 * [ ] backward path 포함
 * [ ] flush/kill 포함
+* [ ] cycle-based일 때 x축=cycle, y축=unit/module 기준 준수
+* [ ] cycle별 behavior(transfer/stall/flush/replay/ready/valid) 명시
 * [ ] cycle 표기 포함 (파이프라인 latency가 핵심인 경우)
 * [ ] error/exception edge case 포함
 * [ ] overview 및 module analysis 링크 존재
@@ -453,6 +493,8 @@ S2:
 ### Module
 
 * [ ] interface 표 존재
+* [ ] memory spec(depth/width/banks/read/write ports) 기술
+* [ ] memory field별 size/description 기술
 * [ ] pseudocode 존재
 * [ ] flow 설명 존재
 * [ ] 파라미터 표 존재
