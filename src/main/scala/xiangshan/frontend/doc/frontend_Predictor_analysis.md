@@ -595,7 +595,11 @@ uBTB는 slot1 1개만 저장. ABTB는 tag = fetch block PC이므로 한 fetch bl
 | Write Buffer | 4 entries |
 | Replacer | PLRU |
 | History 사용 | **없음** |
-| 예측 Latency | **1 cycle** |
+| 예측 Latency | **기준에 따라 다름**: BPU s0 입력 PC 기준 2 cycle / BPU s1 current block 기준 1 cycle |
+
+> 기준 정리:
+> - BPU s0 입력 PC(PC_A) 기준: `PC_A -> PC_B -> PC_C`로 보이는 two-block-ahead 성격
+> - BPU s1 current block(PC_B) 기준: `PC_B -> PC_C` 예측 (non-lookahead)
 
 **AddrField 비트 구조** (`abtb/Helpers.scala:24`):
 ```
@@ -703,14 +707,51 @@ AheadBtbEntry {                           // 1 entry = 1개 분기 (fetch block 
 // → 한 fetch block에 대해 최대 8개 분기를 캐시 가능
 ```
 
+**[핵심] 8 ways의 의미 — Branch Tree가 아닌 Fetch Block 내 복수 Branch**
+
+8 ways는 "다음 fetch block(PC_B)이 가질 수 있는 branch instruction의 최대 개수"를 나타낸다.
+이는 multi-level branch tree(경로 분기 트리)가 **아니다** — 단일 fetch block 내 복수 branch이다.
+
+```
+setIndex(PC_A)로 읽은 SRAM row:
+
+  way0: {tag=PC_B, position=2,  target=PC_C1}  ← PC_B 블록 offset 2번째 instruction이 branch
+  way1: {tag=PC_B, position=5,  target=PC_C2}  ← PC_B 블록 offset 5번째 instruction이 branch
+  way2: {tag=PC_B, position=11, target=PC_C3}  ← PC_B 블록 offset 11번째 instruction이 branch
+  way3: {tag=PC_K, position=7,  target=PC_C4}  ← 다른 경로 PC_A→PC_K의 branch (다른 tag)
+  ...
+
+  // 같은 tag(=PC_B) → 같은 fetch block 내 여러 branch → 동시 hit 정상
+  // 다른 tag(=PC_K) → 다른 경로(PC_A→PC_K)의 entry → PC_K fetch 시에만 hit
+```
+
+8 ways의 두 가지 역할:
+
+| 역할 | 설명 |
+|------|------|
+| **같은 tag, 다른 position** | PC_B 블록 내 여러 branch instruction 동시 캐시 (최대 8개) |
+| **다른 tag** | setIndex(PC_A)를 공유하는 다른 경로(PC_A→PC_K 등)의 entry 공존 |
+
+**오해 방지**: "PC_A → PC_B(2가지 분기) → 8가지 final destination"처럼 branch tree를 캐시하는 것이 아니다.
+ABTB는 **단일 다음 fetch block(PC_B) 안에 branch가 여러 개 있을 수 있다**는 사실을 커버한다.
+
 **Next PC 결정** (Bpu.scala에서 처리):
 ```
-// ABTB에서 최대 8개 Valid[Prediction] 수신
+// ABTB에서 최대 8개 Valid[Prediction] 수신 (PC_B 블록 내 각 branch instruction 하나씩)
 // uBTB의 1개 출력과 concat → s1_btbPrediction[0..8] (총 최대 9개)
-// CompareMatrix로 taken인 것 중 최소 cfiPosition 선택 → 단일 s1_prediction
+// CompareMatrix: taken인 것 중 최소 position 선택 → 단일 s1_prediction
+
+// 예) way0(pos=2, taken), way1(pos=5, not-taken), way2(pos=11, taken)
+//     → taken인 것: way0, way2 중 min position = way0(pos=2)
+//     → next PC = PC_C1
+//
+// 이유: fetch block 안에서 position이 작은 branch가 먼저 실행됨
+//       → 그 branch가 taken이면 이후 instruction은 실행되지 않음
+//       → "첫 번째 taken branch"의 target이 next fetch PC
 ```
 
 **특징**: fetch block 내 최대 8개 분기를 동시에 캐시하고 한 번의 lookup에서 모두 반환.
+CompareMatrix가 "가장 먼저 나오는 taken branch" 하나를 골라 next PC를 결정한다.
 
 **페어 방향 예측기**: `uTAGE` (uBTB와 공유, S1 동시 결과)
 
@@ -744,6 +785,7 @@ Cycle N+2: BPU S1 = PC_B
 **핵심 정리:**
 - uBTB: **1-cycle** (레지스터 기반, PC_B에서 출발)
 - ABTB: **2-cycle** (물리 SRAM 기반, PC_A에서 출발) — ahead 트릭이 1-cycle을 당김
+- 같은 ABTB도 시점을 `PC_B`(BPU s1 current block)로 잡으면 결과까지 **1-cycle**로 보인다
 - 두 경로가 같은 목적지(BPU S1 for PC_B)에 도달
 
 #### 왜 ABTB가 훨씬 큰데 같은 사이클에 출력할 수 있나
@@ -790,12 +832,79 @@ Cycle N+4: BPU S3=PC_B. fastTrain fires:
              → fastTrain.finalPrediction = s3_prediction (PC_B의 최종 예측)
 ```
 
-**Training (AheadBtb.scala:272):**
+#### [핵심] ABTB Training 메커니즘
+
+**ABTB는 fastTrain만 사용한다 — FTQ commit train path 없음**
+
+`AheadBtb.scala:204-206`:
 ```scala
-t1_writeEntry.tag := getTag(t1_train.startPc)  // = getTag(PC_B)
-// written at: t1_setIdx = t1_meta.setIdx = setIndex(PC_A)
+private val t0_train = io.fastTrain.get.bits
+private val t0_fire  = io.enable && io.fastTrain.get.valid
+                       && t0_train.finalPrediction.taken
+                       && t0_train.abtbMeta.valid
 ```
-→ 결과: entry at `setIndex(PC_A)`, tag=`getTag(PC_B)`, data=PC_B의 taken 분기 정보
+
+ABTB에는 `io.train` (FTQ commit 경로) 소비 코드가 없다. `io.fastTrain`만 소비한다. 따라서:
+- Training 시점: **BPU S3** (PC_B가 BPU S1에 진입한 후 ~3 cycle)
+- **"PC_C가 commit될 때 train"이 아니다** — commit(~20~30 cycle 후)보다 훨씬 앞서 완료
+
+**Training 타이밍**:
+```
+Cycle N   : BPU S0 = PC_A → ABTB SRAM 읽기 시작 (setIndex(PC_A))
+Cycle N+1 : BPU S1 = PC_B → abtbMeta 캡처: setIdx=setIndex(PC_A)
+Cycle N+2 : BPU S2 = PC_B → s2_abtbMeta → s3_abtbMeta
+Cycle N+3 : BPU S3 = PC_B → fastTrain 발생 ← Training HERE
+Cycle N+4 : t1_fire → takenCounter 업데이트 + SRAM write (필요 시)
+
+commit:      Cycle N+20~30 ← ABTB는 이때 아무것도 하지 않음
+```
+
+**Training 데이터 출처** (`Bpu.scala:182-186`, `AheadBtb.scala:272-275`):
+
+| SRAM 필드 | 값 | 출처 |
+|---------|-----|------|
+| setIdx | `setIndex(PC_A)` | `abtbMeta.setIdx` (BPU S1에서 캡처) |
+| tag | `getTag(PC_B)` | `fastTrain.startPc = s3_startPc` |
+| position | taken branch의 fetch block 내 위치 | `s3_prediction.cfiPosition` |
+| target | PC_C | `s3_prediction.target` |
+
+→ 결과: entry at `setIndex(PC_A)`, tag=`getTag(PC_B)`, data=PC_B의 taken 분기 정보 (target=PC_C)
+
+**abtbMeta lifetime — 3 cycle, FTQ 저장 없음**:
+```
+// Bpu.scala:151: "abtb meta won't be sent to ftq, used for abtb fast train"
+
+BPU S1 fire → s2_abtbMeta (레지스터)
+BPU S2 fire → s3_abtbMeta (레지스터)
+BPU S3      → fastTrain으로 소비 → 다음 값으로 덮어씌움
+```
+
+다른 predictor(MBTB, TAGE 등)의 meta는 FTQ entry에 저장되어 commit까지 보존되지만, abtbMeta는 BPU 내부 레지스터에만 3 cycle 존재하고 소멸한다. FTQ entry에 abtbMeta 필드가 없는 이유다.
+
+**Training 내용 — 두 가지 업데이트** (`AheadBtb.scala:234-266`):
+
+1. **takenCounter (레지스터, 즉시 업데이트)**:
+```scala
+needDecrease = updateThisSet && isCond && (!t1_trainTaken || (t1_trainTaken && posBefore))
+// taken branch보다 position이 앞선 conditional branch → 실제로 not-taken이었음 → 감소
+
+needIncrease = updateThisSet && isCond && t1_trainTaken && posEqual
+// position이 일치하는 conditional branch → 실제 taken → 증가
+```
+
+2. **SRAM entry write (2가지 경우)**:
+```
+t1_needWriteNewEntry : 해당 branch가 ABTB에 없음 → victim way에 신규 할당
+t1_needCorrectTarget : hit됐으나 indirect branch의 target lower bits 불일치 → target 수정
+```
+
+**Misprediction 시 동작**:
+```
+S3 예측 기반으로 training했는데 실제로 틀렸을 경우 (commit 시 redirect):
+  → BPU가 correct PC부터 re-fetch 시작
+  → 새 경로가 BPU S3를 통과할 때 correct info로 ABTB 재학습 (덮어씌움)
+  ABTB는 "BPU S3 기준 best guess"로 빠르게 학습하고, 틀리면 나중에 교정한다.
+```
 
 **Prediction hit 조건** (동일 경로 PC_A → PC_B 재방문 시):
 ```
