@@ -246,7 +246,66 @@ s2_ready := s2_fire || !s2_valid || overrideValid || redirectValid
 
 ---
 
-## 1.8 Training 방법
+## 1.8 BTB memory indexing hashing 방법
+
+### AddrField 레이아웃
+
+```scala
+// Source: abtb/Helpers.scala:24-35
+val addrFields = AddrField(
+  Seq(
+    ("instOffset", instOffsetBits),  // PC bit [0:0]
+    ("bankIdx",    BankIdxWidth),    // PC bit [2:1]  (BankIdxWidth = log2Ceil(4) = 2)
+    ("setIdx",     SetIdxWidth)      // PC bit [7:3]  (SetIdxWidth  = log2Ceil(32) = 5)
+  ),
+  maxWidth = Option(VAddrBits),
+  extraFields = Seq(
+    ("tag",         instOffsetBits, TagWidth),              // PC bit [24:1]  (TagWidth=24)
+    ("targetLower", instOffsetBits, TargetLowerBitsWidth)   // PC bit [22:1]
+  )
+)
+```
+
+### Predict path: PC_A → bankIdx/setIdx, PC_B → tag
+
+abtb의 핵심 특성: SRAM index는 PC_A (s0_previousStartPc), tag 비교는 PC_B (s2_startPc).
+
+```scala
+// Source: abtb/Helpers.scala:37-44
+def getSetIndex(pc: PrunedAddr): UInt = addrFields.extract("setIdx", pc)
+def getBankIndex(pc: PrunedAddr): UInt = addrFields.extract("bankIdx", pc)
+def getTag(pc: PrunedAddr): UInt       = addrFields.extract("tag",     pc)
+```
+
+| Path | Field | PC 소스 | PC Bits | Width | History |
+|------|-------|---------|---------|-------|---------|
+| Predict SRAM read | bankIdx | PC_A (s0_previousStartPc) | [2:1] | 2 | 없음 |
+| Predict SRAM read | setIdx | PC_A (s0_previousStartPc) | [7:3] | 5 | 없음 |
+| Predict tag compare | tag | PC_B (s2_startPc) | [24:1] | 24 | 없음 |
+
+**tag overlap 설계**: `tag` extraField는 `instOffsetBits=1`에서 시작하여 24-bit 폭이므로 `bankIdx[2:1]`과 `setIdx[7:3]` bit range를 포함한다.
+이는 의도적 설계 — tag가 bankIdx/setIdx 범위 전체를 포함하여 cross-bank·cross-set 오인을 방지한다.
+
+### Train path
+
+```scala
+// Source: abtb/AheadBtb.scala (train 구현부)
+// t1 write 시: setIdx, bankMask → abtbMeta에서 복원 (predict 시점 저장값)
+//              tag             → getTag(t1_train.startPc) 직접 추출
+```
+
+| Path | Field | 소스 | Note |
+|------|-------|------|------|
+| Train (t1) | setIdx | abtbMeta.setIdx | predict 시점에 저장된 값 재사용 |
+| Train (t1) | bankMask | abtbMeta.bankMask | predict 시점에 저장된 값 재사용 |
+| Train (t1) | tag | getTag(t1_train.startPc) | 직접 PC에서 추출 |
+
+- history 사용: **없음**
+- hash 없음 (XOR/fold 미적용), PC 단순 bit extraction
+
+---
+
+## 1.9 Training 방법
 
 ### Trigger: fast-train (s3 finalPrediction + abtbMeta)
 
@@ -309,7 +368,7 @@ elif indirect && target mismatch:
 
 ---
 
-## 1.9 Override 및 redirection
+## 1.10 Override 및 redirection
 
 ```scala
 // Source: abtb/AheadBtb.scala:80-99 (abtb 내부 flush/ready 로직)
@@ -352,7 +411,7 @@ s0_startPc := MuxCase(
 
 ## 품질 체크리스트
 
-- [x] 1.1~1.9 순서 준수
+- [x] 1.1~1.10 순서 준수
 - [x] memory depth/width/banks/read/write ports 명시
 - [x] memory entry 코드 snippet 포함
 - [x] field별 width/description 표 완성
@@ -360,5 +419,6 @@ s0_startPc := MuxCase(
 - [x] pseudocode 포함
 - [x] latency/throughput 수치화 (2 cycle 내부, BPU s1 출력)
 - [x] stage 입력/출력 타이밍 명시
+- [x] indexing/hash 식 + PC/history bit position 명시
 - [x] training trigger/FTQ 저장/meta fields/port conflict 처리 명시
 - [x] override/redirection 우선순위 및 근거 명시

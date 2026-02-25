@@ -258,7 +258,51 @@ private val s1_hitEntry = entries(s1_hitIdx)
 
 ---
 
-## 1.8 Training 방법
+## 1.8 BTB memory indexing hashing 방법
+
+### 구조: 완전 연관 (Fully-Associative), index 없음
+
+ubtb는 완전 연관 register-file 구조이므로 setIdx / bankIdx가 없다.
+32개 entry 전체를 병렬 tag 비교하여 hit를 결정한다.
+
+```scala
+// Source: ubtb/Helpers.scala:25-34
+val addrFields = AddrField(
+  Seq(
+    ("instOffset", instOffsetBits),  // PC bit [0:0], 항상 0 (2B 정렬)
+    ("tag", TagWidth)                // PC bit [22:1]  (TagWidth=22)
+  ),
+  maxWidth = Option(VAddrBits),
+  extraFields = Seq(
+    ("targetLower", instOffsetBits, TargetWidth)  // target bit [22:1]
+  )
+)
+```
+
+### tag 계산식
+
+```scala
+// Source: ubtb/Helpers.scala:36-37
+def getTag(pc: PrunedAddr): UInt =
+  addrFields.extract("tag", pc)
+// ↑ tag = pc[instOffsetBits + TagWidth - 1 : instOffsetBits]
+//       = pc[1 + 22 - 1 : 1] = pc[22:1]
+```
+
+- history 사용: **없음**
+- hash 없음 (XOR/fold 미적용), PC 단순 bit extraction
+
+| Path | Field | Formula | PC Bits | History | Note |
+|------|-------|---------|---------|---------|------|
+| Predict (s1) | tag | pc[22:1] | [22:1] | 없음 | s1_startPc |
+| Train (t0) | tag | pc[22:1] | [22:1] | 없음 | fastTrain.startPc |
+
+> Predict path와 Train path 모두 동일한 formula 사용.
+> instOffset (bit [0]) 은 2B 정렬로 항상 0 — 분류에 사용하지 않음.
+
+---
+
+## 1.9 Training 방법
 
 ### fast-train trigger 조건
 
@@ -422,7 +466,7 @@ class MicroBtbMeta(implicit p: Parameters) extends MicroBtbBundle {
 
 ---
 
-## 1.9 Override 및 redirection
+## 1.10 Override 및 redirection
 
 ### 우선순위 규칙
 
@@ -471,7 +515,7 @@ when(s3_override) {
 
 ## 품질 체크리스트
 
-- [x] 1.1~1.9 순서 준수
+- [x] 1.1~1.10 순서 준수
 - [x] memory depth/width/banks/read/write ports 명시
 - [x] memory entry 코드 snippet 포함
 - [x] field별 width/description 표 완성
@@ -479,5 +523,6 @@ when(s3_override) {
 - [x] pseudocode 포함
 - [x] latency/throughput 수치화 (1 cycle, 1 pred/cycle)
 - [x] stage 입력/출력 타이밍 명시
+- [x] indexing/hash 식 + PC/history bit position 명시
 - [x] training trigger/FTQ 저장/meta fields/port conflict 처리 명시
 - [x] override/redirection 우선순위 및 근거 명시

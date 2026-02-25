@@ -2,9 +2,9 @@
 
 - Block: Frontend
 - Module: N/A (Top-level overview)
-- Source: Frontend.scala, FrontendBundle.scala, BPU.scala, IFU.scala, NewFtq.scala, IBuffer.scala
+- Source: Frontend.scala, FrontendBundle.scala, bpu/Bpu.scala, ifu/Ifu.scala, ftq/Ftq.scala, ibuffer/IBuffer.scala
 - Protocols: Decoupled / Valid / Credit
-- Key Params: FtqSize, IBufSize, IBufNBank, PredictWidth, DecodeWidth, HistoryLength, numBr
+- Key Params: FtqSize, IBuffer.Size, NumWriteBank, NumReadBank, FetchBlockInstNum, DecodeWidth, PhrHistoryLength, GhrHistoryLength
 - Last updated: 2026-02-18
 
 ---
@@ -14,25 +14,26 @@
 XiangShan Frontend는 BPU(분기 예측) → FTQ(Fetch Target Queue) → IFU(명령어 패치) → IBuffer(명령어 버퍼) → Backend(디코드)로 이어지는 비순차적 명령어 공급 파이프라인이다.
 
 - **주요 입력**: Backend로부터 오는 redirect (misprediction flush), sfence, tlbCsr, csrCtrl
-- **주요 출력**: `io.backend.cfVec` (DecodeWidth개 CtrlFlow, IBuffer → Decode)
+- **주요 출력**: `io.backend.cfVec` (DecodeWidth개 CtrlFlow, IBuffer → Decode), `io.backend.stallReason` (stall 원인 정보)
 - **성능/병목**: ICache miss (IFU stall), FTQ full (BPU back-pressure), IBuffer full (fetch stall), misprediction redirect flush
 
 ---
 
 ## 2. Key Parameters
 
-| Parameter    | Source                          | Default / 일반값 | 영향                                   |
-| ------------ | ------------------------------- | --------------- | -------------------------------------- |
-| FtqSize      | `p(XSCoreParamsKey).FtqSize`    | 64              | FTQ 엔트리 수 (BPU-IFU 버퍼 깊이)      |
-| IBufSize     | `p(XSCoreParamsKey).IBufSize`   | 48              | IBuffer 총 엔트리 수                   |
-| IBufNBank    | `p(XSCoreParamsKey).IBufNBank`  | 6               | IBuffer 뱅크 수 (≥ DecodeWidth)        |
-| PredictWidth | `HasXSParameter.PredictWidth`   | 16 (halfwords)  | 한 fetch 블록당 최대 명령어 수          |
-| DecodeWidth  | `p(XSCoreParamsKey).DecodeWidth`| 6               | IBuffer → Decode 동시 출력 너비        |
-| HistoryLength| `p(XSCoreParamsKey).HistoryLength`| 256           | BPU 전역 분기 이력 길이                |
-| numBr        | `p(XSCoreParamsKey).numBr`      | 2               | FTB 엔트리당 최대 분기 슬롯 수          |
-| numDup       | `HasBPUConst.numDup`            | 4               | BPU 내부 PC/history 복제 수 (타이밍 최적화) |
-| ipmpPortNum  | `coreParams.ipmpPortNum`        | ICache ports+1  | PMP checker 포트 수                    |
-| itlbPortNum  | `coreParams.itlbPortNum`        | PortNumber+1    | iTLB 포트 수                           |
+| Parameter           | Source                                             | Default / 일반값 | 영향                                       |
+| ------------------- | -------------------------------------------------- | --------------- | ------------------------------------------ |
+| FtqSize             | `FtqParameters.FtqSize`                            | 64              | FTQ 엔트리 수 (BPU-IFU 버퍼 깊이)          |
+| IBuffer.Size        | `IBufferParameters.Size`                           | 48              | IBuffer 총 엔트리 수                        |
+| NumWriteBank        | `IBufferParameters.NumWriteBank`                   | 4               | IBuffer 쓰기 뱅크 수 (IFU pre-align용)     |
+| NumReadBank         | `IBufferParameters.NumReadBank`                    | 8               | IBuffer 읽기 뱅크 수 (≥ DecodeWidth)        |
+| FetchBlockInstNum   | `FetchBlockSize(64B) / instBytes`                  | 16 or 32        | 한 fetch 블록당 최대 명령어 수              |
+| DecodeWidth         | `p(XSCoreParamsKey).DecodeWidth`                   | 6               | IBuffer → Decode 동시 출력 너비            |
+| PhrHistoryLength    | `FrontendParameters.getPhrHistoryLength`           | 계산값           | PHR(Path History Register) 길이            |
+| GhrHistoryLength    | `HasBpuParameters.GhrHistoryLength`                | SC 최대 table   | SC용 전역 분기 이력(GHR) 길이              |
+| ResolveEntryBranchNumber | `FrontendParameters.ResolveEntryBranchNumber` | 8               | FTQ resolve 엔트리당 최대 분기 슬롯 수      |
+| ipmpPortNum         | `coreParams.ipmpPortNum`                           | ICache ports    | PMP checker 포트 수                        |
+| itlbPortNum         | `coreParams.itlbPortNum`                           | 1               | iTLB 포트 수                               |
 
 ---
 
@@ -45,10 +46,10 @@ config:
 ---
 flowchart LR
  subgraph BPU["Predictor (BPU)"]
-        BS3["S3\nTAGE+SC\n+ITTAGE+RAS\ns3_redirect?"]
-        BS2["S2\nFTB+TAGE-base\ns2_redirect?"]
-        BS1["S1\nFauFTB\n1st prediction"]
-        BS0["S0\nPC mux\nHistory gen"]
+        BS3["S3\nMBTB+ITTAGE+RAS\ns3_override?"]
+        BS2["S2\nMBTB+TAGE+SC\ns2_prediction"]
+        BS1["S1\nUBTB+ABTB+UTAGE\n+MicroRAS\n1st prediction"]
+        BS0["S0\nPC mux\nPHR/GHR gen"]
   end
  subgraph FTQ["Ftq"]
         FQ_COMM["commPtr\ncommit from ROB"]
@@ -97,7 +98,7 @@ flowchart LR
     PMP -. pmp resp .-> ICache & IFU
     F3 -- toIbuffer Decoupled --> IBuf
     F3 -- pdWb Valid --> FTQ
-    IBuf -- cfVec DecoupledIO --> Backend
+    IBuf -- "cfVec + stallReason" --> Backend
     Backend -. "toFtq.redirect Valid" .-> FTQ
     Backend -. rob_commits .-> IFU
     FTQ -. icacheFlush .-> ICache
@@ -105,11 +106,12 @@ flowchart LR
     IFU -. mmioCommitRead .-> FTQ
 ```
 
-### 5.7 BPU 내부 override bubble
+### 5.7 BPU 내부 s3_override
 
-- S2가 S1 예측보다 더 앞선 idx로 redirect → `overrideBubble(0) = true`
-- S3가 S2 예측보다 더 앞선 idx로 redirect → `overrideBubble(1) = true`
-- FTQ에서 IFU에게 `flushFromBpu.s2/s3` 전달 → F0 단계에서 `f0_flush_from_bpu`
+- S3 결과가 S1 예측과 다를 때 `s3_override = true` (`Bpu.scala:380`: `s3_valid && !(s3_prediction === s3_s1Prediction)`)
+- override 발생 시 FTQ로 S3 예측 결과를 재전송 (`io.toFtq.prediction.bits.s3Override := s3_override`)
+- S2 단계의 별도 override는 없으며, `s3_flush`가 발생하면 S2/S1도 함께 flush됨
+- FTQ에서 IFU에게 `flushFromBpu` 전달 → IFU F0 단계에서 소비
 
 ---
 
@@ -127,7 +129,7 @@ flowchart LR
 ### 6.3 ECC / TileLink corrupt (AF)
 
 - `ExceptionType.fromECC(enable, corrupt)` / `fromTilelink(corrupt)`
-- ICache 내부에서 `io.error` Valid 출력 → `errorReg = RegNext(icache.io.error)` → `io.error` L1BusErrorUnit 전달 (Frontend.scala:436)
+- ICache 내부에서 `io.error` Valid 출력 → `errorReg = RegNext(icache.io.error)` → `io.error` L1BusErrorUnit 전달 (`Frontend.scala:262-263`)
 
 ### 6.4 MMIO 명령어 처리
 

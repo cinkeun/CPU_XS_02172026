@@ -2,9 +2,9 @@
 
 - Block: Frontend
 - Module: N/A (전체 I/O 흐름)
-- Source: Frontend.scala, IFU.scala, NewFtq.scala, BPU.scala, IBuffer.scala
+- Source: Frontend.scala, ifu/Ifu.scala, ftq/Ftq.scala, bpu/Bpu.scala, ibuffer/IBuffer.scala
 - Protocols: Decoupled / Valid
-- Key Params: FtqSize=64, PredictWidth=16, DecodeWidth=6, IBufSize=48
+- Key Params: FtqSize=64, FetchBlockInstNum=16, DecodeWidth=6, IBuffer.Size=48, NumWriteBank=4, NumReadBank=8
 - Last updated: 2026-02-18
 
 → See [frontend_block_diagram_overview.md](./frontend_block_diagram_overview.md)
@@ -18,7 +18,7 @@
 | Port | Protocol | 방향 | 설명 |
 | ---- | -------- | ---- | ---- |
 | `io.backend.toFtq.redirect` | Valid | Backend → FTQ | Misprediction/MemVio redirect |
-| `io.backend.toFtq.rob_commits` | Valid Vec | Backend → IFU | ROB commit 정보 (MMIO 제어) |
+| `io.backend.toFtq.commit` | Valid FtqPtr | Backend → FTQ | ROB commit 신호 (FTQ commit ptr 갱신, MMIO lastCommit 체크용) |
 | `io.backend.canAccept` | Bool | Backend → IBuffer | Decode가 수락 가능한지 |
 | `io.backend.wfi.wfiReq` | Bool | Backend → ICache/Uncache | WFI 요청 |
 | `io.reset_vector` | UInt | SoC → BPU | 리셋 시 시작 PC |
@@ -61,9 +61,9 @@ sequenceDiagram
   BPU->>BPU: [C0] S0: PC mux, history gen
 
   Note over BPU,FTQ: Cycle 1 — BPU S1
-  BPU->>BPU: [C1] S1: FauFTB lookup → 1st prediction
-  BPU->>FTQ: [C1] bpu_to_ftq.resp.valid (s1 pred, ftq_idx)
-  FTQ-->>BPU: bpu_to_ftq.resp.ready
+  BPU->>BPU: [C1] S1: UBTB+ABTB+UTAGE+MicroRAS lookup → 1st prediction
+  BPU->>FTQ: [C1] io.toFtq.prediction.valid (s1 pred, startPc, ftqIdx)
+  FTQ-->>BPU: io.toFtq.prediction.ready
 
   Note over FTQ,IFU: Cycle 1 — FTQ enqueue, IFU F0
   FTQ->>IFU: [C1] toIfu.req.valid (FetchRequestBundle: startAddr, nextlineStart, ftqIdx)
@@ -94,12 +94,18 @@ sequenceDiagram
 
 > **실제 아키텍처 (코드 근거: `bpu/Bpu.scala`, `ftq/Ftq.scala`):**
 >
-> - BPU 내부에는 S1/S2/S3 3단 파이프라인이 있으나, **FTQ에 전달되는 override는 S3에서만 발생**
-> - S2 flush는 BPU 내부(`s2_flush := s3_flush || s3_override`)에서만 처리
->   (TODO comment: "wait for Ifu/ICache to remove bpu s2 flush" — `Ftq.scala`)
-> - S3 override 조건: `s3_override := s3_valid && !(s3_prediction === s3_s1Prediction)`
->   → S3의 최종 예측이 동일 PC_A에 대한 S1 초기 예측과 다를 때 발생
-> - **prediction.ready 비의존**: `bpuS3Redirect = prediction.valid && s3Override` — FTQ full이어도 실행
+> BPU → FTQ 경로는 **두 가지 독립적인 흐름**이 있다:
+>
+> | 경로 | 조건 | FTQ 동작 | latency |
+> |------|------|-----------|---------|
+> | **S1 신규 enq** | `s1_valid && s2_ready` | `entryQueue[bpuPtr]` 신규 기록, `bpuPtr++` | ~1 cycle |
+> | **S3 override** | `s3_override` (S3≠S1) | `entryQueue[s3FtqPtr]` 덮어쓰기, `bpuPtr := s3FtqPtr+1` | ~3 cycle |
+>
+> - **S1 (uBTB/ABTB) 예측은 항상 FTQ에 먼저 들어간다.** BPU latency가 3-cycle 고정이 아니다.
+> - **S3 override**는 S3 결과가 S1 결과와 다를 때(`s3_override := s3_valid && !(s3_prediction === s3_s1Prediction)`)만 발생하며, 기존에 S1이 enq한 entry를 **사후 교정**한다.
+> - S2는 BPU 내부 flush(`s2_flush := s3_flush || s3_override`)만 처리하며 FTQ에 직접 전달하지 않는다.
+>   (참고: Ftq.scala TODO — "wait for Ifu/ICache to remove bpu s2 flush")
+> - **prediction.ready 비의존**: `bpuS3Redirect = prediction.valid && s3Override` — FTQ full이어도 override는 실행된다.
 
 ### FTQ 인덱스 추적 (s3FtqPtr)
 
@@ -269,7 +275,7 @@ sequenceDiagram
 
   Note over BPU: Cycle N+2 — BPU 재시작
   BPU->>BPU: [CN+2] S0: redirect target을 새 PC로 설정
-  BPU->>FTQ: [CN+2] bpu_to_ftq (새 예측)
+  BPU->>FTQ: [CN+2] io.toFtq.prediction (새 예측)
 
   Note over FTQ,IFU: Cycle N+3 — IFU 재시작
   FTQ->>IFU: [CN+3] toIfu.req.valid (새 FetchRequestBundle)
@@ -332,8 +338,8 @@ sequenceDiagram
 
   Note over IFU,FTQ: MMIO instr → IBuffer (1개씩)
   IFU->>FTQ: mmioCommitRead.valid=1 (MMIO FtqPtr 조회)
-  FTQ-->>IFU: mmioLastCommit (ROB commit 여부)
-  BE->>FTQ: rob_commits (commit 신호)
+  BE->>FTQ: toFtq.commit.valid (CtrlToFtqIO.commit — ROB commit ptr)
+  FTQ-->>IFU: mmioCommitRead.mmioLastCommit (commit ptr >= mmioPtr 여부)
 
   alt mmioLastCommit=1
     IFU->>IFU: [C] mmio_redirect → 다음 MMIO PC로 flush
@@ -349,7 +355,7 @@ sequenceDiagram
 
 ### 7.1 IBuffer full → fetch stall
 
-- `allowEnq = (IBufSize - PredictWidth).U >= numValidNext` — 거의 full 시 차단
+- `allowEnq := io.in.bits.prevInstrCount < nextNumInvalid` (nextNumInvalid = Size.U − nextNumValid) — 다음 사이클의 invalid 엔트리 수보다 다음 fetch 명령어 수가 적을 때만 enqueue 허용
 - `io.full = !allowEnq` → `io.frontendInfo.ibufFull` 출력 → Backend에 stall 신호
 - IFU `toIbuffer.ready` = false → F3 stall → F2 stall → FTQ back-pressure
 
