@@ -126,6 +126,85 @@ case class ScParameters(
 
 > `singlePort = true`: 각 bank는 read/write 포트가 물리적으로 1개. read 우선.
 
+### 왜 Path/Global/BW/Bias를 "서로 다른 table"로 분리하는가
+
+핵심은 **같은 크기의 SRAM wrapper(`ScTable`)를 재사용하더라도, 인덱스 입력과 학습하려는 통계가 서로 다르기 때문**이다.
+
+- PathTable: `PC ^ foldedPathHist`로 인덱싱. path history 기반 상관관계 학습.
+- GlobalTable: `PC ^ foldedGHR`로 인덱싱. global history 기반 상관관계 학습.
+- BWTable: `PC ^ foldedBW`로 인덱싱. backward(루프) history 기반 상관관계 학습.
+- BiasTable: history 없이 `PC` 기반 set + `wayIdx + (providerWeak/providerTaken)`로 way를 확장해, **TAGE provider 방향 편향**을 직접 학습.
+
+```scala
+// Source: sc/Helpers.scala:37-59
+getPathTableIdx   = PC ^ foldedPathHist
+getGlobalTableIdx = PC ^ foldedGhr
+getBWTableIdx     = PC ^ foldedBW
+getBiasTableIdx   = PC only
+
+// Source: sc/Sc.scala:287-293
+biasWayIdx = Cat(wayIdx, providerIsWeak, providerTaken)
+```
+
+```scala
+// Source: sc/Parameters.scala:23-40, 74
+PathTableInfos      = [(128, hist=8), (128, hist=16)]
+GlobalTableInfos    = [(128, hist=8), (128, hist=16)]
+BackwardTableInfos  = [(128, hist=4), (128, hist=8)]
+BiasTableNumWays    = NumWays << 2   // providerWeak/providerTaken 2비트 반영
+```
+
+즉, "형태는 비슷한 SRAM"이지만 **학습 신호 공간(feature space)이 다르므로 분리된 테이블**이 맞다.
+현재 기본 설정에서는 `Path/Bias`만 enable이고 `Global/BW`는 기능 게이트(`GlobalEnable/BWEnable`)로 비활성화되어 있다.
+
+### 왜 같은 타입의 테이블이 두 개씩인가
+
+`ScTableInfo`의 두 필드는 `Size`와 `HistoryLength`뿐이다:
+
+```scala
+// Source: bpu/Types.scala:132
+class ScTableInfo(val Size: Int, val HistoryLength: Int)
+```
+
+같은 타입 내 두 테이블은 **Size는 동일하고 HistoryLength만 다르다**:
+
+| 그룹 | [0] Size / HistLen | [1] Size / HistLen |
+|---|---|---|
+| PathTable | 128 / **8** | 128 / **16** |
+| GlobalTable | 128 / **8** | 128 / **16** |
+| BWTable | 128 / **4** | 128 / **8** |
+
+HistoryLength가 다르면 인덱스 계산이 달라진다:
+
+```scala
+// Source: sc/Sc.scala:153-160
+private val s0_pathIdx = PathTableInfos.map(info =>
+  getPathTableIdx(
+    s0_startPc,
+    new FoldedHistoryInfo(info.HistoryLength, min(info.HistoryLength, log2Ceil(info.Size))),
+    io.foldedPathHist,
+    info.Size
+  )
+)
+// PathTable[0]: PC_high ^ fold(pathHist[7:0],  7bit) → set index
+// PathTable[1]: PC_high ^ fold(pathHist[15:0], 7bit) → 다른 set index
+```
+
+**두 테이블은 s0에서 동시에(병렬로) read되고, 결과는 합산된다**:
+
+```scala
+// Source: sc/Sc.scala:235-236
+private val s1_pathPercsum =
+  VecInit.tabulate(NumWays)(w =>
+    s1_pathResp.map(entry => getPercsum(entry(w).ctr.value)).reduce(_ +& _)
+  )
+// [0].ctr.percsum + [1].ctr.percsum → winner-take-all이 아닌 additive vote
+```
+
+즉, 두 테이블은 **서로 다른 history length로 같은 분기를 동시에 관찰**하고 그 결과를 합산한다. 이는 TAGE가 geometric sequence로 여러 history length 테이블을 두는 것과 같은 철학으로, 짧은 history(빠른 학습, 좁은 컨텍스트)와 긴 history(느린 학습, 넓은 컨텍스트)가 상호 보완한다.
+
+BWTable의 history가 더 짧은 이유(4, 8 vs 8, 16): backward/loop 패턴은 주기가 짧아 긴 history가 불필요하다.
+
 ---
 
 ## 1.3 Memory Entry 설명
@@ -267,6 +346,30 @@ onPredict(startPc, foldedPathHist, commonHR, mbtbResult, providerTakenCtrs):
 
 > SRAM: `holdRead=true` → s1에서 응답 유효.
 > s2 출력은 combinatorial (s1 결과에 mbtb/TAGE s2 신호 결합).
+
+### 왜 `SC(scTakenMask/scUsed)`와 `SC meta` latency가 다른가
+
+- `scTakenMask`, `scUsed`는 s2에서 바로 계산되어 즉시 출력된다.
+
+```scala
+// Source: sc/Sc.scala:342-343
+io.scTakenMask := s2_scPred
+io.scUsed      := s2_useScPred
+```
+
+- `meta`는 FTQ training용으로 **s2 결과를 한 번 더 레지스터링**해서 s3에 전달한다.
+
+```scala
+// Source: sc/Sc.scala:349-360
+io.meta.scPathResp      := ... RegEnable(..., s2_fire)
+io.meta.scPred          := RegEnable(s2_scPred, s2_fire)
+io.meta.useScPred       := RegEnable(s2_useScPred, s2_fire)
+io.meta.sumAboveThres   := RegEnable(s2_sumAboveThres, s2_fire)
+```
+
+정리:
+- 예측 결정 신호(`scTakenMask/scUsed`)는 BPU s2의 최종 MUX에 바로 쓰이므로 latency 2.
+- 학습 메타(`meta`)는 stage 정합/FTQ 저장을 위해 s3로 넘기므로 latency 3.
 
 ---
 
