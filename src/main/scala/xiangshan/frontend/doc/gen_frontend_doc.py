@@ -106,7 +106,7 @@ XiangShan Frontend Pipeline — Block Diagram
            v                               +------------------+
   +---------------------------------+      |   iTLB / PMP     |
   |           IBuffer               |      |  TLB PortNum+1   |
-  |  IBufNBank=6 banked FIFO        |      |  PMP+Checker     |
+  |  ReadBanks=8, WriteBanks=4      |      |  PMP+Checker     |
   |  48 entries, interleaved        |      +------------------+
   |  Output Reg (1 stage)           |
   +--------+------------------------+
@@ -118,7 +118,7 @@ XiangShan Frontend Pipeline — Block Diagram
   +---------------------------------+
 
 Key Parameters:
-  FtqSize=64, IBuffer.Size=48, IBufNBank=6, FetchBlockInstNum=16
+  FtqSize=64, IBuffer.Size=48, IBuffer(read=8, write=4), FetchBlockInstNum=32
   DecodeWidth=6, PhrHistoryLength=(computed), GhrHistoryLength=(SC max)
   FetchBlockSize=64B, FetchBlockAlignSize=32B
 """
@@ -508,20 +508,22 @@ FTQ Pointer Structure
 IBUF_STRUCTURE = r"""
 IBuffer Bank Layout (Interleaved)
 ===================================
-  IBufSize=48, IBufNBank=6, bankSize=8
+  IBufSize=48, NumReadBank=8, ReadBankSize=6, NumWriteBank=4, WriteBankSize=12
 
   Linear index:  0  1  2  3  4  5  6  7  8  9  10  11  12 ...
   Bank mapping:
-    Bank 0: ibuf[0, 6, 12, 18, 24, 30, 36, 42]
-    Bank 1: ibuf[1, 7, 13, 19, 25, 31, 37, 43]
-    Bank 2: ibuf[2, 8, 14, 20, 26, 32, 38, 44]
-    Bank 3: ibuf[3, 9, 15, 21, 27, 33, 39, 45]
-    Bank 4: ibuf[4,10, 16, 22, 28, 34, 40, 46]
-    Bank 5: ibuf[5,11, 17, 23, 29, 35, 41, 47]
+    Bank 0: ibuf[0, 8, 16, 24, 32, 40]
+    Bank 1: ibuf[1, 9, 17, 25, 33, 41]
+    Bank 2: ibuf[2,10, 18, 26, 34, 42]
+    Bank 3: ibuf[3,11, 19, 27, 35, 43]
+    Bank 4: ibuf[4,12, 20, 28, 36, 44]
+    Bank 5: ibuf[5,13, 21, 29, 37, 45]
+    Bank 6: ibuf[6,14, 22, 30, 38, 46]
+    Bank 7: ibuf[7,15, 23, 31, 39, 47]
 
   Dequeue 2-stage read:
     Stage 1: each bank selects 1 entry (bankSize:1 Mux per bank)
-    Stage 2: each output slot selects from IBufNBank candidates (IBufNBank:1 Mux)
+    Stage 2: each output slot selects from NumReadBank candidates (NumReadBank:1 Mux)
     → DecodeWidth=6 reads, each from a different bank → no port conflict
 
   Bypass path: enqPtr==deqPtr && decodeCanAccept
@@ -529,8 +531,8 @@ IBuffer Bank Layout (Interleaved)
     → saves 1 cycle when buffer is empty
 
   Full detection:
-    allowEnq = (IBufSize - PredictWidth) >= numValidNext
-    (PredictWidth=16 margin to prevent overflow)
+    allowEnq := prevInstrCount < nextNumInvalid
+    (ready is registered and uses previous IFU enqueue demand)
 """
 
 BTB_HIERARCHY = r"""
@@ -640,7 +642,7 @@ def build_doc():
         ["IBuffer.Size", "IBufferParameters.Size", "48", "Total IBuffer entries"],
         ["NumWriteBank", "IBufferParameters.NumWriteBank", "4", "IBuffer write banks"],
         ["NumReadBank", "IBufferParameters.NumReadBank", "8", "IBuffer read banks (≥ DecodeWidth)"],
-        ["FetchBlockInstNum", "FetchBlockSize(64B)/instBytes", "16 or 32", "Max instructions per fetch block"],
+        ["FetchBlockInstNum", "FetchBlockSize(64B)/instBytes", "32 (HasCExtension=true), else 16", "Max instructions per fetch block"],
         ["DecodeWidth", "XSCoreParamsKey.DecodeWidth", "6", "IBuffer→Decode output width"],
         ["PhrHistoryLength", "FrontendParameters.getPhrHistoryLength", "computed", "Path History Register length"],
         ["GhrHistoryLength", "HasBpuParameters.GhrHistoryLength", "SC max table", "Global History Register for SC"],
@@ -804,7 +806,7 @@ def build_doc():
     doc.add_paragraph(
         "Role: 3-stage branch prediction pipeline. "
         "S1 (uBTB+ABTB+uTAGE), S2 (MBTB+TAGE+SC), S3 (MBTB-latched+ITTAGE+RAS). "
-        "Each stage sends predictions to FTQ; a later stage overrides FTQ if its result differs from S1. "
+        "FTQ receives S1 prediction, and S3 sends override updates only when it differs from S1. "
         "Location: Frontend.scala → Module(new Predictor) inside FrontendInlinedImp. "
         "Pipeline: 3 register stages (S1/S2/S3); S0 is the combinational launch phase."
     )
@@ -825,7 +827,7 @@ def build_doc():
     doc.add_heading("3.3 Interfaces", 2)
     bpu_iface = [
         ["Port", "Dir", "Protocol", "Description"],
-        ["io.bpu_to_ftq.resp", "out", "Decoupled", "Prediction result → FTQ (s1/s2/s3)"],
+        ["io.bpu_to_ftq.resp", "out", "Decoupled", "Prediction result → FTQ (S1 new enqueue or S3 override update)"],
         ["io.ftq_to_bpu.redirect", "in", "Valid", "FTQ→BPU redirect (misprediction)"],
         ["io.ftq_to_bpu.update", "in", "Valid", "FTQ→BPU training data"],
         ["io.ftq_to_bpu.enq_ptr", "in", "—", "FTQ current enqueue pointer"],
@@ -1069,14 +1071,16 @@ def build_doc():
     doc.add_heading("6.2 Key Parameters", 2)
     ibuf_params = [
         ["Parameter", "Source", "Default", "Effect"],
-        ["IBufSize", "XSCoreParamsKey.IBufSize", "48", "Total buffer entries (IBufNBank × bankSize)"],
-        ["IBufNBank", "XSCoreParamsKey.IBufNBank", "6", "Bank count (≥ DecodeWidth required)"],
+        ["IBufSize", "IBufferParameters.Size", "48", "Total buffer entries"],
+        ["NumWriteBank", "IBufferParameters.NumWriteBank", "4", "Write-bank count (enqueue datapath)"],
+        ["NumReadBank", "IBufferParameters.NumReadBank", "8", "Read-bank count (must be ≥ DecodeWidth)"],
         ["PredictWidth", "HasXSParameter.PredictWidth", "16", "Max enqueue instructions per cycle"],
         ["DecodeWidth", "XSCoreParamsKey.DecodeWidth", "6", "Max dequeue instructions per cycle"],
-        ["bankSize", "IBufSize / IBufNBank", "8", "Entries per bank"],
+        ["ReadBankSize", "IBufSize / NumReadBank", "6", "Entries per read bank"],
+        ["WriteBankSize", "IBufSize / NumWriteBank", "12", "Entries per write bank"],
     ]
     add_table_from_rows(doc, ibuf_params)
-    doc.add_paragraph("Constraints: IBufSize % IBufNBank == 0;  IBufNBank >= DecodeWidth")
+    doc.add_paragraph("Constraints: IBufSize % NumWriteBank == 0; IBufSize % NumReadBank == 0; NumReadBank >= DecodeWidth")
 
     doc.add_heading("6.3 Interfaces", 2)
     ibuf_iface = [
@@ -1100,13 +1104,13 @@ def build_doc():
         "enqOffset(i) = PopCount(io.in.bits.valid.take(i)) — computes each instruction's write slot. "
         "Bypass: when enqPtr==deqPtr && decodeCanAccept, the first DecodeWidth instructions are "
         "forwarded directly to OutputEntries; only the remainder is written to ibuf registers. "
-        "Full guard: allowEnq = (IBufSize - PredictWidth) >= numValidNext (PredictWidth margin)."
+        "Full guard: allowEnq := prevInstrCount < nextNumInvalid (registered ready logic)."
     )
 
     doc.add_heading("6.6 Dequeue Logic (2-Stage Read)", 2)
     doc.add_paragraph(
         "Stage 1: Each bank selects 1 entry via bankSize:1 Mux (deqInBankPtr index). "
-        "Stage 2: Each output slot selects from IBufNBank results via IBufNBank:1 Mux (deqBankPtr index). "
+        "Stage 2: Each output slot selects from NumReadBank results via NumReadBank:1 Mux (deqBankPtr index). "
         "DecodeWidth=6 reads each come from a different bank → no structural hazard."
     )
 
@@ -1143,10 +1147,10 @@ Back-pressure propagation:
     ibuf_timing = [
         ["Critical Path", "Description"],
         ["Enqueue write mux", "IBufSize × PredictWidth Mux1H — select 1 source per ibuf entry"],
-        ["Dequeue 2-stage read", "Stage1: bankSize:1 Mux × IBufNBank; Stage2: IBufNBank:1 Mux × DecodeWidth"],
+        ["Dequeue 2-stage read", "Stage1: ReadBankSize:1 Mux × NumReadBank; Stage2: NumReadBank:1 Mux × DecodeWidth"],
         ["enqOffset PopCount", "PopCount(valid.take(i)) × PredictWidth — parallel prefix sum"],
         ["outputEntriesValidNum", "PriorityMuxDefault over DecodeWidth outputs — priority encoder"],
-        ["numValidNext → allowEnq", "Addition + comparison — on io.in.ready critical path"],
+        ["nextNumInvalid → allowEnq", "allowEnq := prevInstrCount < nextNumInvalid (registered ready path)"],
         ["deqBankPtr update", "deqBankPtrVec(i) + numDeq × DecodeWidth — parallel circular ptr"],
     ]
     add_table_from_rows(doc, ibuf_timing)
