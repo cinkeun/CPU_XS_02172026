@@ -266,6 +266,18 @@ val addrFields = AddrField(
 )
 ```
 
+### SRAM 물리 구조
+
+4개의 독립 bank로 구성되며, 각 bank가 32 sets × 8 ways SRAM을 가진다.
+
+```
+AheadBtb
+├── bank[0]: SRAM (32 sets × 8 ways)  ← AheadBtbBank
+├── bank[1]: SRAM (32 sets × 8 ways)
+├── bank[2]: SRAM (32 sets × 8 ways)
+└── bank[3]: SRAM (32 sets × 8 ways)
+```
+
 ### Predict path: PC_A → bankIdx/setIdx, PC_B → tag
 
 abtb의 핵심 특성: SRAM index는 PC_A (s0_previousStartPc), tag 비교는 PC_B (s2_startPc).
@@ -282,6 +294,36 @@ def getTag(pc: PrunedAddr): UInt       = addrFields.extract("tag",     pc)
 | Predict SRAM read | bankIdx | PC_A (s0_previousStartPc) | [2:1] | 2 | 없음 |
 | Predict SRAM read | setIdx | PC_A (s0_previousStartPc) | [7:3] | 5 | 없음 |
 | Predict tag compare | tag | PC_B (s2_startPc) | [24:1] | 24 | 없음 |
+
+### Bank → Set → Way 접근 순서
+
+```scala
+// Source: abtb/AheadBtb.scala:110-130
+// s0: bankIdx로 해당 bank에만 read req, setIdx로 row 지정
+val s0_bankMask = UIntToOH(s0_bankIdx)
+banks.zipWithIndex.foreach { case (b, i) =>
+  b.io.readReq.valid       := predictReqValid && s0_bankMask(i)  // 1개 bank만 활성
+  b.io.readReq.bits.setIdx := s0_setIdx                           // 32 sets 중 1 row
+}
+
+// s1: 선택된 bank의 응답에서 8 ways 전부 수신
+val s1_entries = Mux1H(s1_bankMask, banks.map(_.io.readResp.entries))  // Vec(8, AheadBtbEntry)
+
+// s2: 8 ways 각각 tag 비교 → hit mask (address select가 아닌 tag compare)
+s2_hitMask[i] = s2_entries[i].valid && s2_entries[i].tag === s2_tag
+prediction[i].valid = s2_valid && s2_hitMask[i]
+```
+
+| 단계 | 동작 | PC 소스 | 결과 |
+|------|------|---------|------|
+| s0: bank select | `bankIdx`=PC[2:1] → `UIntToOH` → 1개 bank에만 readReq | PC_A | 4 banks 중 1개 활성화 |
+| s0: set address | `setIdx`=PC[7:3] → SRAM row address | PC_A | 32 sets 중 1 row 지정 |
+| s1: row read | 선택된 bank → `Mux1H` → 8 ways 전부 반환 | — | Vec(8, AheadBtbEntry) |
+| s2: way 판별 | **tag compare** (address select 아님) `entry[i].tag === getTag(PC_B)` | PC_B | hitMask[0..7] |
+
+- way 선택은 "주소 비트로 1개 선택"이 아니라 **8 ways 전부를 읽은 뒤 tag match**로 hit 여부 판별
+- 복수 hit(다른 way, 같은 position)가 발생할 수 있으며 multi-hit 시 하나를 무효화
+- BPU top에서 hit된 way들 중 `position`이 가장 앞선 taken branch를 최종 선택
 
 **tag overlap 설계**: `tag` extraField는 `instOffsetBits=1`에서 시작하여 24-bit 폭이므로 `bankIdx[2:1]`과 `setIdx[7:3]` bit range를 포함한다.
 이는 의도적 설계 — tag가 bankIdx/setIdx 범위 전체를 포함하여 cross-bank·cross-set 오인을 방지한다.

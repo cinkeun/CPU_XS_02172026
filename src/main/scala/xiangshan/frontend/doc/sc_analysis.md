@@ -254,6 +254,54 @@ val s2_biasIdxLowBits = Cat(valid && ctr.isWeak, valid && taken)
 // biasWayIdx = Cat(wayIdx[2:0], biasIdxLowBits[1:0])  → 5-bit index into 32 ways
 ```
 
+### PathTable과 BiasTable의 entry 비교
+
+ScEntry 타입은 동일하지만 **테이블 구조가 근본적으로 다르다**.
+
+```
+             PathTable                   BiasTable
+             ─────────                   ─────────
+Set 수        128                         128        ← 동일
+Entry 타입    ScEntry(ctr: 6bit)          ScEntry(ctr: 6bit)  ← 동일
+Way 수        NumWays = 8                 BiasTableNumWays = 32  ← 4배
+Set index     PC ^ foldedPathHistory      PC only (history 없음)
+Way index     cfiPosition[2:0]            Cat(cfiPosition[2:0],
+                                              providerIsWeak,
+                                              providerTaken)
+```
+
+**Way 수가 4배인 이유**: `BiasTableNumWays = NumWays << BiasUseTageBitWidth = 8 << 2 = 32`.
+Way address의 하위 2비트가 TAGE provider 상태 `(isWeak, taken)`로 채워지므로,
+같은 PC의 같은 cfiPosition이라도 TAGE 상태에 따라 **4개의 별도 counter slot**에 접근한다.
+
+```scala
+// Source: sc/Parameters.scala:74
+def BiasTableNumWays: Int = NumWays << BiasUseTageBitWidth  // 8 << 2 = 32
+
+// Source: sc/Sc.scala:287-293
+val s2_biasIdxLowBits = Cat(valid && ctr.isWeak, valid && taken)
+// bit[1]: providerValid && providerCtr.isWeak
+// bit[0]: providerValid && providerTaken
+
+val biasWayIdx = Cat(wayIdx, s2_biasIdxLowBits)
+// = Cat( cfiPosition[2:0], providerIsWeak[1], providerTaken[0] )
+// → 총 5-bit index → 32 ways 중 1개 선택
+```
+
+이 구조가 의미하는 것: TAGE provider 상태별로 별도 counter가 존재하므로
+"TAGE가 weak-taken으로 예측할 때의 실제 결과"와 "saturate-taken일 때의 실제 결과"를 독립적으로 학습한다.
+
+**Set index 차이 요약**:
+
+```scala
+// Source: sc/Helpers.scala:37-59
+getPathTableIdx = (PC >> offset) ^ foldedPathHist  // history 혼합
+getBiasTableIdx = (PC >> offset)                   // PC만 (history 없음)
+```
+
+PathTable은 path history를 XOR해 같은 PC도 call-path가 다르면 다른 set을 참조한다.
+BiasTable은 history 없이 PC만으로 set을 결정하고, 대신 way dimension에서 TAGE 상태를 구분한다.
+
 ---
 
 ## 1.4 Paired BTB 설명
