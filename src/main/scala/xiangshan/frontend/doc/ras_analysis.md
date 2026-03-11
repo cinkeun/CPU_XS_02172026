@@ -1,88 +1,88 @@
-# RAS (Return Address Stack) 분석 리포트
+# RAS (Return Address Stack) Analysis Report
 
-> **분석 원칙**: code-based only. web-search 및 사전 지식 기반 추론 금지.
+> **Analysis Principle**: code-based only. No web-search and prior knowledge-based inferences.
 
 ---
 
-## 1.1 요약
+## 1.1 Summary
 
-| 항목 | 내용 |
+| Item | Content |
 |---|---|
-| 코어/레포/커밋 | XiangShan / `kunminghu-v3` / `bfbb21862` |
+| core/repo/commit | XiangShan / `kunminghu-v3` / `bfbb21862` |
 | RAS depth | specQueue=32, commitStack=16 |
-| ITTAGE 존재 여부 | 있음. 단 `needIttage = isIndirect && !hasPop` 조건. **ret(isReturn=true)에는 RAS 우선, ITTAGE 비사용** |
-| 업데이트 방식 | **Hybrid** — speculative push/pop(S3-fire 기반) + commit-time 확정 |
-| 복구 방식 | **Checkpoint** — redirect meta(`ssp`, `sctr`, `tosw`, `tosr`, `nos`)를 FTQ에 저장, redirect 시 포인터 일괄 복원 후 재-push/pop |
-| 연속 prediction 실패 복구 | redirect마다 checkpoint 복원. 단, `stackNearOverflow=true` 상태에서 redirect 조건 실패 시 복구가 스킵될 수 있음 (RAS-003 참조) |
-| Ret 타겟 우선순위 | **RAS 절대 우선**: `isReturn=true`이면 무조건 `ras.io.topRetAddr` 사용. ITTAGE는 `isIndirect && !hasPop` 조건에서만 사용 |
-| Multi-fetch 동시 call/ret | **Single-event**: 한 cycle에 하나의 call 또는 ret만 처리 (`io.specIn.valid = s3_fire`, 단일 이벤트) |
-| 핵심 리스크 Top 3 | ① overflow 시 redirect 억제 가능성(RAS-003) ② `commitPushAddr = DontCare`(RAS-004) ③ 다중 call/ret 미처리(RAS-005) |
+| ITTAGE Existence | Yes. However, the condition `needIttage = isIndirect && !hasPop`. **Ret(isReturn=true) takes RAS priority, does not use ITTAGE** |
+| Update method | **Hybrid** — speculative push/pop (based on S3-fire) + commit-time confirmation |
+| Recovery method | **Checkpoint** — Save redirect meta (`ssp`, `sctr`, `tosw`, `tosr`, `nos`) to FTQ, restore pointers in batch when redirect, then re-push/pop |
+| Recovery from consecutive prediction failures | Restore checkpoint for each redirect. However, recovery may be skipped if the redirect condition fails in `stackNearOverflow=true` state (refer to RAS-003) |
+| Ret target priority | **RAS absolute priority**: If `isReturn=true`, use `ras.io.topRetAddr` unconditionally. ITTAGE is used only in `isIndirect && !hasPop` condition |
+| Multi-fetch simultaneous call/ret | **Single-event**: Only one call or ret is processed in one cycle (`io.specIn.valid = s3_fire`, single event) |
+| Top 3 core risks | ① Possibility of redirect suppression in case of overflow (RAS-003) ② `commitPushAddr = DontCare` (RAS-004) ③ Multiple call/ret not processed (RAS-005) |
 
 ---
 
-## 1.2 관찰 기반 인터페이스 기록
+## 1.2 Observation-based interface recording
 
-### Ras 모듈 (`Ras.scala`)
+### Ras module (`Ras.scala`)
 
-| 신호명 | 방향 | 설명 |
+| signal name | direction | Description |
 |---|---|---|
-| `io.specIn.valid` | Input | S3 fire. push/pop 트리거 |
-| `io.specIn.bits.attribute.isCall` | Input | push 여부 |
-| `io.specIn.bits.attribute.isReturn` | Input | pop 여부 |
-| `io.specIn.bits.cfiPosition` | Input | fetch block 내 instruction offset |
-| `io.specIn.bits.startPc` | Input | fetch block 시작 PC |
-| `io.topRetAddr` | Output | 현재 RAS top (return address). S3에서 사용 |
-| `io.redirectMeta` | Output | redirect용 checkpoint meta |
-| `io.commitMeta` | Output | commit용 meta |
-| `io.redirect.valid` | Input | redirect/recovery 트리거 |
-| `io.redirect.bits.attribute.isCall/isReturn` | Input | redirect 시 재-push/pop 여부 |
-| `io.redirect.bits.meta.ras` | Input | checkpoint 복원용 meta |
-| `io.commit.valid` | Input | commit 확정 |
+| `io.specIn.valid` | Input | S3 fire. push/pop trigger |
+| `io.specIn.bits.attribute.isCall` | Input | push or not |
+| `io.specIn.bits.attribute.isReturn` | Input | pop or not |
+| `io.specIn.bits.cfiPosition` | Input | instruction offset in fetch block |
+| `io.specIn.bits.startPc` | Input | start block fetch PC |
+| `io.topRetAddr` | Output | Current RAS top (return address). Used in S3 |
+| `io.redirectMeta` | Output | checkpoint meta for redirect |
+| `io.commitMeta` | Output | meta for commit |
+| `io.redirect.valid` | Input | redirect/recovery trigger |
+| `io.redirect.bits.attribute.isCall/isReturn` | Input | Whether to re-push/pop when redirecting |
+| `io.redirect.bits.meta.ras` | Input | meta for checkpoint restoration |
+| `io.commit.valid` | Input | commit confirmation |
 | `io.commit.bits.attribute.isCall/isReturn` | Input | commit push/pop |
 
-### MicroRas 모듈 (`MicroRas.scala`)
+### MicroRas module (`MicroRas.scala`)
 
-| 신호명 | 방향 | 설명 |
+| signal name | direction | Description |
 |---|---|---|
-| `io.specIn.attribute.isCall/isReturn` | Input | S1의 call/ret 감지 |
-| `io.specIn.startPc`, `cfiPosition` | Input | push addr 계산용 |
-| `io.hasRedirect` | Input | 전역 redirect 신호 |
-| `io.hasOverride` | Input | S3 override 신호 |
-| `io.fullRetAddr` | Input | 주 RAS top 주소 (`ras.io.topRetAddr`) |
-| `io.specOut.retTarget` | Output | S1에 제공하는 예측 return 주소 |
-| `io.specOut.isCanUse` | Output | 예측 유효 여부 |
+| `io.specIn.attribute.isCall/isReturn` | Input | S1 call/ret detection |
+| `io.specIn.startPc`, `cfiPosition` | Input | push addr for calculation |
+| `io.hasRedirect` | Input | global redirect signal |
+| `io.hasOverride` | Input | S3 override signal |
+| `io.fullRetAddr` | Input | Primary RAS top address (`ras.io.topRetAddr`) |
+| `io.specOut.retTarget` | Output | Predicted return address provided to S1 |
+| `io.specOut.isCanUse` | Output | Prediction Validity |
 
-### RAS 내부 포인터 (`RasStack.scala`)
+### RAS internal pointer (`RasStack.scala`)
 
-| 신호명 | 설명 |
+| signal name | Description |
 |---|---|
-| `tosw` | Top of Stack write pointer (specQueue에서 가장 최근 push 위치) |
-| `tosr` | Top of Stack read pointer (현재 top 읽기 위치) |
-| `ssp` | Committed stack pointer (speculative 참조용) |
-| `sctr` | Stack counter (동일 주소 연속 push 압축 카운터, max=7) |
+| `tosw` | Top of Stack write pointer (most recent push location in specQueue) |
+| `tosr` | Top of Stack read pointer (current top read position) |
+| `ssp` | Committed stack pointer (for speculative reference) |
+| `sctr` | Stack counter (same address consecutive push compression counter, max=7) |
 | `nsp` | Non-speculative committed stack pointer |
-| `bos` | Bottom of Spec Queue pointer (commit 기준선) |
+| `bos` | Bottom of Spec Queue pointer (commit baseline) |
 
 ---
 
-## 1.3 동작 규칙 명문화
+## 1.3 Codification of operating rules
 
-### Call 판별 규칙
+### Call determination rules
 
 ```scala
 // Source: src/main/scala/xiangshan/frontend/bpu/Bundles.scala:52,82-86
 def isCall: Bool = rasAction === BranchAttribute.RasAction.Push
 // hasPush:
-//   branchType === Direct && isLink(rd) && !isRVC  (jal rd=x1/x5, 비압축)
+// branchType === Direct && isLink(rd) && !isRVC (jal rd=x1/x5, uncompressed)
 //   branchType === Indirect && isLink(rd)           (jalr rd=x1/x5)
 // isLink(reg) = reg === 1 || reg === 5
 ```
 
-- `jal` with `rd=x1` 또는 `rd=x5` (비압축 명령어, RVC `c.jal`은 RV64에서 `c.addiw`로 decode됨)
-- `jalr` with `rd=x1` 또는 `rd=x5`
+- `jal` with `rd=x1` or `rd=x5` (uncompressed instruction, RVC `c.jal` is decoded as `c.addiw` in RV64)
+- `jalr` with `rd=x1` or `rd=x5`
 - `jalr` with `rd=x1/x5` AND `rs1=x1/x5` (PopAndPush: return-and-call)
 
-### Return 판별 규칙
+### Return determination rules
 
 ```scala
 // Source: src/main/scala/xiangshan/frontend/bpu/Bundles.scala:53,124-125
@@ -91,23 +91,23 @@ def isReturn: Bool = rasAction === BranchAttribute.RasAction.Pop
 //   branchType === Indirect && isLink(rs) && rd =/= rs
 ```
 
-- `jalr` with `rs1=x1` 또는 `rs1=x5`, 단 `rd≠rs1`
+- `jalr` with `rs1=x1` or `rs1=x5`, but with `rd≠rs1`
 
-### Push 규칙
+### Push rules
 
 ```scala
 // Source: src/main/scala/xiangshan/frontend/bpu/ras/Ras.scala:65-74
 private val specPush = io.specIn.valid && io.specIn.bits.attribute.isCall
 stack.spec.pushValid := specPush && !stackNearOverflow
-private val specAlignPc  = specIn.startPc & alignMask      // FetchBlockAlignWidth 기준 정렬
+private val specAlignPc = specIn.startPc & alignMask // Align by FetchBlockAlignWidth
 private val specPushAddr = specAlignPc + (specIn.cfiPosition << 1.U).asUInt + 2.U
 ```
 
-- S3-fire 시 isCall이 참이면 push 발생
-- 저장 주소: `(startPc & ~alignMask) + (cfiPosition * 2) + 2` → call 명령어 다음 2바이트 주소 (compressed ISA 기준)
-- `stackNearOverflow=true`이면 push 억제
+- If isCall is true during S3-fire, push occurs.
+- Storage address: `(startPc & ~alignMask) + (cfiPosition * 2) + 2` → 2 byte address following call instruction (based on compressed ISA)
+- Suppress push if `stackNearOverflow=true`
 
-### Pop 규칙
+### Pop Rules
 
 ```scala
 // Source: src/main/scala/xiangshan/frontend/bpu/ras/Ras.scala:66,72
@@ -115,34 +115,34 @@ private val specPop = io.specIn.valid && io.specIn.bits.attribute.isReturn
 stack.spec.popValid := specPop && !stackNearOverflow
 ```
 
-- S3-fire 시 isReturn이 참이면 pop 발생
-- 반환 주소는 `timingTop.retAddr` (1 cycle 선행 계산된 레지스터)
-- `stackNearOverflow=true`이면 pop 억제
+- If isReturn is true during S3-fire, pop occurs.
+- The return address is `timingTop.retAddr` (register calculated 1 cycle ahead)
+- Pop suppression if `stackNearOverflow=true`
 
-### Flush/Redirect 시 복구 규칙
+### Recovery rules when Flush/Redirect
 
 ```scala
 // Source: src/main/scala/xiangshan/frontend/bpu/ras/Ras.scala:93-114
-private val redirect = RegNextWithEnable(io.redirect)  // 1사이클 지연
+private val redirect = RegNextWithEnable(io.redirect) // 1 cycle delay
 
 stack.redirect.valid := redirect.valid && (isBefore(redirectTOSW, stackTOSW) || !stackNearOverflow)
-// 포인터 일괄 복원
+// Batch restore pointers
 when(io.redirect.valid) {
   tosr := io.redirect.meta.tosr
   tosw := io.redirect.meta.tosw
   ssp  := io.redirect.meta.ssp
   sctr := io.redirect.meta.sctr
-  // redirect가 call이면 re-push, ret이면 re-pop
+// If redirect is call, re-push, if ret, re-pop
 }
 ```
 
-- redirect 신호는 `RegNextWithEnable`로 1사이클 지연 후 처리
-- 저장된 `{ssp, sctr, tosw, tosr, nos}` checkpoint를 복원
-- redirect가 call 명령어인 경우: 포인터 복원 후 추가로 specPush 실행
-- redirect가 ret 명령어인 경우: 포인터 복원 후 추가로 specPop 실행
-- **경고**: `stackNearOverflow=true` 이고 `redirectTOSW >= stackTOSW` 이면 redirect 처리 스킵
+- The redirect signal is processed after 1 cycle delay with `RegNextWithEnable`.
+- Restore the saved `{ssp, sctr, tosw, tosr, nos}` checkpoint
+- If redirect is a call command: additionally execute specPush after restoring the pointer
+- When redirect is a ret command: additionally execute specPop after restoring the pointer
+- **Warning**: If `stackNearOverflow=true` and `redirectTOSW >= stackTOSW`, redirect processing is skipped.
 
-### ITTAGE/BTB와 충돌 시 선택 규칙
+### Selection rules in case of conflict with ITTAGE/BTB
 
 ```scala
 // Source: src/main/scala/xiangshan/frontend/bpu/Bpu.scala:355-375
@@ -153,35 +153,35 @@ private val s3_useIttage = s3_firstTakenBranch.bits.attribute.needIttage && itta
 s3_prediction.target := MuxCase(
   s3_fallThroughPrediction.target,
   Seq(
-    (s3_taken && s3_useRas)    -> ras.io.topRetAddr,    // 최우선
+(s3_taken && s3_useRas) -> ras.io.topRetAddr, // top priority
     (s3_taken && s3_useIttage) -> ittage.io.prediction.target,
     s3_taken                   -> s3_firstTakenBranch.bits.target
   )
 )
 ```
 
-우선순위 (높→낮):
-1. `isReturn` → **RAS** (ITTAGE 조건과 상호 배타적: `hasPop`이면 `needIttage=false`)
+Priority (high → low):
+1. `isReturn` → **RAS** (mutually exclusive with ITTAGE condition: if `hasPop`, then `needIttage=false`)
 2. `isIndirect && !hasPop && ittage hit` → **ITTAGE**
 3. `taken` → mBTB target
 4. fallthrough
 
-### 동일 fetch block 내 다중 call/ret 동시 발생 규칙
+### Multiple call/ret simultaneous occurrence rules within the same fetch block
 
-- **한 cycle에 단 하나의 이벤트만 처리**: `io.specIn.valid = s3_fire`는 단일 신호
-- `s3_prediction`은 fetch block 내 **첫 번째 taken 분기**의 attribute를 사용
-- 따라서 같은 fetch block에 call+ret이 있어도, 첫 taken 분기 하나만 처리됨
-- `call_call`, `call_ret`, `ret_call`, `ret_ret`: 첫 번째 이벤트만 RAS에 반영
+- **Process only one event in one cycle**: `io.specIn.valid = s3_fire` is a single signal
+- `s3_prediction` uses the attribute of the **first branch taken** in the fetch block.
+- Therefore, even if there is call+ret in the same fetch block, only the first branch taken is processed.
+- `call_call`, `call_ret`, `ret_call`, `ret_ret`: Only the first event is reflected in RAS
 
 ---
 
-## 1.4 이슈 목록
+## 1.4 Issue list
 
 ### RAS-001
 - **ID**: RAS-001
-- **심각도**: `Medium`
-- **증상**: `stackNearOverflow=true` 상태에서 push와 pop이 모두 억제되어 RAS 예측 정확도 저하
-- **근거**:
+- **Severity**: `Medium`
+- **Symptom**: In `stackNearOverflow=true` state, both push and pop are suppressed, reducing RAS prediction accuracy.
+- **reason**:
   ```scala
   // Source: src/main/scala/xiangshan/frontend/bpu/ras/Ras.scala:64,71-72
   private val stackNearOverflow = stack.specNearOverflow
@@ -192,66 +192,66 @@ s3_prediction.target := MuxCase(
     specNearOverflowed := true.B
   }
   ```
-- **개선 제안**: overflow 시에도 pop은 계속 허용하거나, pop 억제 없이 overflow entry를 순환 덮어쓰기하는 방식 고려
+- **Improvement suggestion**: Continue to allow pops even when overflowing, or consider cyclically overwriting overflow entries without suppressing pops.
 
 ### RAS-002
 - **ID**: RAS-002
-- **심각도**: `High`
-- **증상**: redirect 시 `stackNearOverflow=true` 이고 `!isBefore(redirectTOSW, stackTOSW)` 이면 redirect 처리가 스킵됨
-- **근거**:
+- **Severity**: `High`
+- **Symptom**: When redirecting, if `stackNearOverflow=true` is `!isBefore(redirectTOSW, stackTOSW)`, redirect processing is skipped.
+- **reason**:
   ```scala
   // Source: src/main/scala/xiangshan/frontend/bpu/ras/Ras.scala:99
   stack.redirect.valid := redirect.valid && (isBefore(redirectTOSW, stackTOSW) || !stackNearOverflow)
   ```
-- **개선 제안**: overflow 시에도 redirect를 항상 허용하거나, overflow 상태 진입 시 즉시 RAS reset 고려
+- **Improvement suggestion**: Always allow redirect even when overflowing, or consider RAS reset immediately when entering overflow state.
 
 ### RAS-003
 - **ID**: RAS-003
-- **심각도**: `Medium`
-- **증상**: `commitPushAddr = DontCare` (Ras.scala:108)로 설정되어 실제 push 주소는 `specQueue(metaTosw.value).retAddr`에서 가져오는데, SpecQueueSize(32) 한계 초과 시 specQueue 슬롯이 덮여쓰여질 수 있음
-- **근거**:
+- **Severity**: `Medium`
+- **Symptom**: When set to `commitPushAddr = DontCare` (Ras.scala:108), the actual push address is taken from `specQueue(metaTosw.value).retAddr`, but if the SpecQueueSize(32) limit is exceeded, the specQueue slot may be overwritten.
+- **reason**:
   ```scala
   // Source: src/main/scala/xiangshan/frontend/bpu/ras/Ras.scala:108
   private val commitPushAddr = DontCare
   // Source: src/main/scala/xiangshan/frontend/bpu/ras/RasStack.scala:352
   private val commitPushAddr = specQueue(io.commit.metaTosw.value).retAddr
   ```
-- **개선 제안**: FTQ에 실제 push 주소를 직접 저장하여 specQueue 의존성 제거
+- **Improvement suggestion**: Remove specQueue dependency by directly storing actual push address in FTQ.
 
 ### RAS-004
 - **ID**: RAS-004
-- **심각도**: `Medium`
-- **증상**: 다중 call/ret 동시 처리 미지원. 하나의 fetch block에 call+ret이 있으면 첫 번째 이벤트만 처리
-- **근거**: `io.specIn.valid = s3_fire` 단일 valid, `s3_prediction`은 하나의 분기만 표현
-- **개선 제안**: fetch block 내 모든 call/ret을 순서대로 처리하는 다중 이벤트 큐 도입
+- **Severity**: `Medium`
+- **Symptom**: Multiple call/ret simultaneous processing not supported. If there is call+ret in one fetch block, only the first event is processed.
+- **Rationale**: `io.specIn.valid = s3_fire` is single valid, `s3_prediction` represents only one branch.
+- **Improvement suggestion**: Introducing multiple event queues that process all calls/rets within a fetch block in order.
 
 ### RAS-005
 - **ID**: RAS-005
-- **심각도**: `Info`
-- **증상**: 주석 처리된 `XSError` assertion이 2곳 있음 — nsp-ssp 불일치, commit/spec 주소 불일치
-- **근거**:
+- **Severity**: `Info`
+- **Symptom**: Two commented `XSError` assertions — nsp-ssp mismatch, commit/spec address mismatch.
+- **reason**:
   ```scala
   // Source: src/main/scala/xiangshan/frontend/bpu/ras/RasStack.scala:349,371-373
   // XSError(io.commit.metaSsp =/= nsp, "nsp mismatch with expected ssp")
   // XSError(io.commit.pushAddr =/= commitPushAddr, "addr from commit mismatch with addr from spec")
   ```
-- **개선 제안**: 주석 처리 원인을 파악하고 수정 또는 조건부 assertion으로 재활성화
+- **Improvement Suggestions**: Identify the cause of annotation processing and fix it or reactivate it with conditional assertions.
 
 ### RAS-006
 - **ID**: RAS-006
-- **심각도**: `Low`
-- **증상**: `bos` 업데이트의 FIXME 주석 — `distanceBetween(io.commit.metaTosw, bos) > 2` 조건이 예상치 않게 발생
-- **근거**:
+- **Severity**: `Low`
+- **Symptom**: FIXME annotation for `bos` update — Condition `distanceBetween(io.commit.metaTosw, bos) > 2` occurs unexpectedly.
+- **reason**:
   ```scala
   // Source: src/main/scala/xiangshan/frontend/bpu/ras/RasStack.scala:381-385
   // FIXME: Currently this assertion fails. Fix or reconsider it in the future.
   // XSError(io.commit.valid && (distanceBetween(io.commit.metaTosw, bos) > 2.U), ...)
   ```
-- **개선 제안**: bos 갱신 정책 재검토 및 의도적 조건인지 버그인지 명확화
+- **Improvement Suggestion**: Reexamine the BOS renewal policy and clarify whether it is an intentional condition or a bug.
 
 ---
 
-## 1.5 다음 예측 pseudocode
+## 1.5 Next prediction pseudocode
 
 ```text
 onPredict(input: {startPc, s1_prediction, s3_prediction}, mainRasTop: PrunedAddr):
@@ -330,7 +330,7 @@ onPredict(input: {startPc, s1_prediction, s3_prediction}, mainRasTop: PrunedAddr
 
 ---
 
-## 1.6 Input-to-output latency 및 throughput
+## 1.6 Input-to-output latency and throughput
 
 | Unit | Input Stage | Output Stage | Latency(cycle) | Throughput(pred/cycle) |
 |---|---|---|---|---|
@@ -339,14 +339,14 @@ onPredict(input: {startPc, s1_prediction, s3_prediction}, mainRasTop: PrunedAddr
 | Main RAS top read | — | S3 (`ras.io.topRetAddr`) | 0 (combinational from `timingTop` register) | — |
 | Redirect recovery | redirect.valid | redirect+2 cycles (RegNextWithEnable + 1) | 2 cycles | — |
 
-**참고**:
-- `timingTop`은 레지스터이지만 push/pop 이벤트와 **동일 사이클**에 업데이트됨 (non-blocking assignment)
-- 실제로는 "직전 S3 push/pop 이벤트 후 다음 cycle에 topRetAddr이 반영됨"
-- MicroRas는 S1에서 결과를 제공하므로 S3보다 2사이클 빠른 early prediction
+**reference**:
+- `timingTop` is a register, but updated in the **same cycle** as the push/pop event (non-blocking assignment)
+- In reality, “topRetAddr is reflected in the next cycle after the previous S3 push/pop event.”
+- MicroRas provides results in S1, so early prediction is 2 cycles faster than S3
 
 ---
 
-## 1.7 Pipeline stage 위치
+## 1.7 Pipeline stage location
 
 | Signal | Produced @ Stage | Consumed @ Stage | Timing Note |
 |---|---|---|---|
@@ -361,15 +361,15 @@ onPredict(input: {startPc, s1_prediction, s3_prediction}, mainRasTop: PrunedAddr
 
 ---
 
-## 1.8 Training 방법
+## 1.8 Training method
 
-### Training trigger 정리
+### Training trigger summary
 
-| Trigger | Predictor | 입력 | speculative 여부 |
+| Trigger | Predictor | input | speculative or not |
 |---|---|---|---|
 | S3-fire (speculative) | RAS (push/pop) | `startPc`, `cfiPosition`, `attribute` | Speculative |
 | redirect (mispredict) | RAS (restore+redo) | checkpoint meta `{ssp,sctr,tosw,tosr,nos}`, `cfiPc+2` | Recovery |
-| commit-valid | commitStack 업데이트 | `attribute.isCall/isReturn`, `metaSsp`, `metaTosw` | Non-speculative |
+| commit-valid | commitStack update | `attribute.isCall/isReturn`, `metaSsp`, `metaTosw` | Non-speculative |
 
 ### Training meta fields
 
@@ -392,23 +392,23 @@ class RasCommitMeta(implicit p: Parameters) extends RasBundle {
 }
 ```
 
-#### 1.8.1 training 트리거 상세
+#### 1.8.1 training trigger details
 
-**resolve/mispredict 기반**:
-- `io.redirect` (BpuRedirect) 수신 시 RAS 복구
-- `redirect.bits.meta.ras` 필드로 checkpoint 복원
-- redirect.isCall이면 re-push, redirect.isRet이면 re-pop
-- RAS 자체는 별도 테이블 학습 없음 — 순수 stack 복원
+**resolve/mispredict based**:
+- RAS recovery when receiving `io.redirect` (BpuRedirect)
+- Restore checkpoint to `redirect.bits.meta.ras` field
+- Re-push if redirect.isCall, re-pop if redirect.isRet
+- RAS itself does not learn separate tables — pure stack restoration
 
-**commit 기반**:
-- `io.commit.valid`(RegNext 지연 1사이클) 수신 시 commitStack 업데이트
-- push: `specQueue(metaTosw.value).retAddr`에서 주소 읽어 commitStack에 씀
-- pop: commitStack[nsp].ctr 감소, nsp 조정
+**commit-based**:
+- Update commitStack when receiving `io.commit.valid` (RegNext delay 1 cycle)
+- push: Read address from `specQueue(metaTosw.value).retAddr` and write to commitStack
+- pop: commitStack[nsp].ctr reduction, nsp adjustment
 
-**fast-train (S3 override 기반)**:
-- MicroRas는 S3 override 신호를 받아 S1-S2 in-flight 상태를 즉시 리셋
+**fast-train (based on S3 override)**:
+- MicroRas receives the S3 override signal and immediately resets the S1-S2 in-flight state.
 
-#### 1.8.2 FTQ 저장 정보
+#### 1.8.2 FTQ storage information
 
 ```scala
 // Source: src/main/scala/xiangshan/frontend/bpu/Bundles.scala:261-275
@@ -420,24 +420,24 @@ class BpuCommitMeta(implicit p: Parameters) extends BpuBundle {
 }
 ```
 
-| 저장 정보 | Field | 용도 |
+| Storage information | Field | Use |
 |---|---|---|
-| `ssp` (speculative stack ptr) | redirectMeta.ras.ssp | redirect 시 복원 |
-| `sctr` (stack counter) | redirectMeta.ras.sctr | redirect 시 복원 |
-| `tosw` (write ptr) | redirectMeta.ras.tosw, commitMeta.ras.tosw | redirect/commit 시 사용 |
-| `tosr` (read ptr) | redirectMeta.ras.tosr | redirect 시 복원 |
-| `nos` (next-of-stack ptr) | redirectMeta.ras.nos | redirect pop 시 다음 top 계산 |
-| `topRetAddr` | redirectMeta.ras.topRetAddr | (저장은 하나 실제 사용 여부 미확인) |
-| `ssp` (commit) | commitMeta.ras.ssp | commit 시 nsp 보정 |
-| `tosw` (commit) | commitMeta.ras.tosw | commitStack 주소 조회용 |
+| `ssp` (speculative stack ptr) | redirectMeta.ras.ssp | Restore on redirect |
+| `sctr` (stack counter) | redirectMeta.ras.sctr | Restore on redirect |
+| `tosw` (write ptr) | redirectMeta.ras.tosw, commitMeta.ras.tosw | Used when redirect/commit |
+| `tosr` (read ptr) | redirectMeta.ras.tosr | Restore on redirect |
+| `nos` (next-of-stack ptr) | redirectMeta.ras.nos | Calculate next top when redirect pop |
+| `topRetAddr` | redirectMeta.ras.topRetAddr | (Stored, but not confirmed for actual use) |
+| `ssp` (commit) | commitMeta.ras.ssp | nsp correction when commit |
+| `tosw` (commit) | commitMeta.ras.tosw | For querying commitStack address |
 
-#### 1.8.3 FTQ 내 저장 위치
+#### 1.8.3 Storage location within FTQ
 
-- `BpuMeta.redirectMeta.ras` (RasRedirectMeta): **FTQ entry field 직접 저장**
-- `BpuMeta.commitMeta.ras` (RasCommitMeta): **FTQ entry field 직접 저장**
-- 별도 meta RAM 없음 — FTQ entry 내 inline 저장
+- `BpuMeta.redirectMeta.ras` (RasRedirectMeta): **Save FTQ entry field directly**
+- `BpuMeta.commitMeta.ras` (RasCommitMeta): **Save FTQ entry field directly**
+- No separate meta RAM — inline storage within FTQ entry
 
-#### 1.8.4 write port congestion 처리
+#### 1.8.4 Write port congestion handling
 
 ```scala
 // Source: src/main/scala/xiangshan/frontend/bpu/ras/RasStack.scala:305-313
@@ -448,14 +448,14 @@ when(realPush) {
 }
 ```
 
-- specQueue 실제 쓰기(`realPush`)는 push 이벤트로부터 **1 cycle 지연**
-- 지연 동안 `writeBypassEntry/writeBypassValid`로 bypass
-- 포인터(tosw/tosr/ssp/sctr) 업데이트는 즉각적(같은 cycle)
-- **single write port**: arbiter 없음, 한 cycle에 하나의 push 이벤트만 처리
+- specQueue actual write (`realPush`) is delayed by **1 cycle** from push event
+- bypass to `writeBypassEntry/writeBypassValid` during delay
+- Pointer (tosw/tosr/ssp/sctr) updates are immediate (same cycle)
+- **single write port**: No arbiter, only one push event processed in one cycle
 
 ---
 
-## 2) Memory 구조 분석
+## 2) Memory structure analysis
 
 ### 2.1 Memory Spec
 
@@ -474,37 +474,37 @@ case class RasParameters(
 )
 ```
 
-### 2.2 Memory update/recovery 경로
+### 2.2 Memory update/recovery path
 
-**Speculative push 경로**:
-1. S3-fire 시 `io.spec.pushValid` 활성화
-2. 포인터(tosw/ssp/sctr) 즉각 업데이트
-3. `writeBypassEntry` 즉각 업데이트 (다음 cycle 읽기용 bypass)
-4. `realPush = RegNext(pushValid)` → 다음 cycle에 specQueue 실제 쓰기
+**Speculative push path**:
+1. Activate `io.spec.pushValid` during S3-fire
+2. Immediate update of pointers (tosw/ssp/sctr)
+3. `writeBypassEntry` immediate update (bypass for reading next cycle)
+4. `realPush = RegNext(pushValid)` → Actually write specQueue in the next cycle
 
-**Speculative pop 경로**:
-1. S3-fire 시 `io.spec.popValid` 활성화
-2. `topNos`를 참조해 `tosr` 업데이트
-3. `timingTop` 레지스터: 다음 top을 미리 계산하여 저장
+**Speculative pop path**:
+1. Activate `io.spec.popValid` during S3-fire
+2. Update `tosr` with reference to `topNos`
+3. `timingTop` register: Pre-calculate and store the next top
 
-**Flush/redirect 복구 경로**:
-1. `redirect.valid` 수신 → `RegNextWithEnable`로 1cycle 지연
-2. `stack.redirect.valid` 조건 평가
-3. `tosr/tosw/ssp/sctr` 일괄 복원
-4. isCall이면 push, isRet이면 pop 추가 실행
-5. `writeBypass` 갱신
+**Flush/redirect recovery path**:
+1. Receive `redirect.valid` → 1 cycle delay to `RegNextWithEnable`
+2. `stack.redirect.valid` condition evaluation
+3. `tosr/tosw/ssp/sctr` batch restore
+4. If isCall, push, if isRet, pop is additionally executed.
+5. `writeBypass` Update
 
-**Commit 확정 경로**:
-1. `io.commit.valid` → `RegNext`로 1cycle 지연
-2. pushValid이면: specQueue[metaTosw]에서 주소 읽어 commitStack[nsp] 업데이트, nsp 전진
-3. popValid이면: commitStack[nsp].ctr 감소, nsp 후진
-4. `bos` 업데이트: commit push 시 `bos := metaTosw`
+**Commit confirmation path**:
+1. 1 cycle delay from `io.commit.valid` → `RegNext`
+2. If pushValid: Read address from specQueue[metaTosw], update commitStack[nsp], advance nsp
+3. If popValid: commitStack[nsp].ctr decrement, nsp backward
+4. `bos` update: `bos := metaTosw` when commit push
 
 ---
 
-## 3) RAS Entry 정의
+## 3) RAS Entry definition
 
-### 6.1 Entry 정의 코드 snippet
+### 6.1 Entry definition code snippet
 
 ```scala
 // Source: src/main/scala/xiangshan/frontend/bpu/ras/Bundles.scala:27-39
@@ -514,40 +514,40 @@ class RasEntry(implicit p: Parameters) extends RasBundle {
 }
 ```
 
-### 6.2 Entry field 설명
+### 6.2 Entry field description
 
 | Field Name | Width(bit) | Description |
 |---|---|---|
-| `retAddr` | VAddrBits (pruned) | 반환 주소. `PrunedAddr`로 상위 비트 일부 pruning |
-| `ctr` | 3 | 동일 반환 주소의 연속 push 압축 카운터. 0 = 1번, 7 = 8번(max) |
+| `retAddr` | VAddrBits (pruned) | return address. pruning some of the upper bits with `PrunedAddr` |
+| `ctr` | 3 | Compression counter for consecutive pushes with the same return address. 0 = 1 time, 7 = 8 times (max) |
 
-**압축 동작**: 같은 `retAddr`가 연속으로 push될 때 ctr을 증가시키고 새 슬롯 할당 없이 기존 슬롯에 누적. pop 시 ctr > 0이면 ctr만 감소, ctr = 0이면 실제 슬롯 해제.
+**Compression operation**: When the same `retAddr` is pushed consecutively, ctr is incremented and accumulated in the existing slot without allocating a new slot. When popping, if ctr > 0, only ctr is decreased, and if ctr = 0, the actual slot is released.
 
 ---
 
-## 4) 다중 call/ret 동시 처리 규칙
+## 4) Multiple call/ret simultaneous processing rules
 
-| 케이스 | 처리 방식 | 결과 |
+| case | Processing method | Results |
 |---|---|---|
-| `call_call` (같은 fetch block) | 첫 taken 분기만 처리 | 두 번째 call 미처리 → 복귀 주소 스택 불완전 |
-| `call_ret` | call이 첫 taken이면 call만 처리 | ret 미처리 |
-| `ret_call` | ret이 첫 taken이면 ret만 처리 | call 미처리 |
-| `ret_ret` | 첫 ret만 처리 | 두 번째 ret 미처리 |
-| 동일 slot call+ret (PopAndPush) | `isReturnAndCall = rasAction === PopAndPush` | **Ras.scala에서는 isCall/isReturn만 체크** — PopAndPush가 정상 처리되는지 코드에서 명확히 확인 필요 |
+| `call_call` (same fetch block) | Process only the first taken branch | Second call unprocessed → return address stack incomplete |
+| `call_ret` | If call is first taken, only call is processed | ret unprocessed |
+| `ret_call` | If ret is the first taken, only ret is processed | call unprocessed |
+| `ret_ret` | Process only the first ret | Second ret unprocessed |
+| Same slot call+ret (PopAndPush) | `isReturnAndCall = rasAction === PopAndPush` | **In Ras.scala, only isCall/isReturn is checked** — You need to clearly check in the code whether PopAndPush is processed properly |
 
-**주목**: `BranchAttribute.PopAndPush` (`RasAction.PopAndPush = 0b11`) 존재하나, `Ras.scala`의 조건은:
+**Notice**: `BranchAttribute.PopAndPush` (`RasAction.PopAndPush = 0b11`) exists, but the condition of `Ras.scala` is:
 ```scala
 private val specPush = io.specIn.valid && io.specIn.bits.attribute.isCall
 private val specPop  = io.specIn.valid && io.specIn.bits.attribute.isReturn
 // isCall = rasAction === Push (0b10)
 // isReturn = rasAction === Pop (0b01)
-// PopAndPush (0b11)이면 isCall=false, isReturn=false → 둘 다 처리 안 됨!
+// If PopAndPush (0b11), isCall=false, isReturn=false → Neither is processed!
 ```
 
 **RAS-007** (Critical):
-- **심각도**: `High`
-- **증상**: `PopAndPush (0b11)` (return-and-call: jalr rs1=x1/x5, rd=x1/x5, rs1≠rd) 명령어 처리 시 push도 pop도 발생하지 않음
-- **근거**:
+- **Severity**: `High`
+- **Symptom**: Neither push nor pop occurs when processing the `PopAndPush (0b11)` (return-and-call: jalr rs1=x1/x5, rd=x1/x5, rs1≠rd) command.
+- **reason**:
   ```scala
   // Bundles.scala:54: def isReturnAndCall: Bool = rasAction === RasAction.PopAndPush
   // Ras.scala:65-66:
@@ -555,7 +555,7 @@ private val specPop  = io.specIn.valid && io.specIn.bits.attribute.isReturn
   private val specPop  = io.specIn.valid && io.specIn.bits.attribute.isReturn    // isReturn = Pop(0b01) only
   // PopAndPush(0b11) is neither
   ```
-- **개선 제안**: `hasPush/hasPop` 비트 필드를 사용하도록 변경:
+- **Improvement suggestion**: Change to use the `hasPush/hasPop` bit field:
   ```scala
   private val specPush = io.specIn.valid && io.specIn.bits.attribute.hasPush
   private val specPop  = io.specIn.valid && io.specIn.bits.attribute.hasPop
@@ -563,57 +563,57 @@ private val specPop  = io.specIn.valid && io.specIn.bits.attribute.isReturn
 
 ---
 
-## 5) 검증(테스트) 기준
+## 5) Verification (testing) standards
 
-### 기본 케이스
+### Base case
 
-- [x] 기본 call/ret — call push 후 ret pop
-- [x] 중첩 call/ret — push 2회 후 pop 2회
-- [ ] overflow 경계 — SpecQueueSize(32) 초과 call 시 specNearOverflow=true, push/pop 억제
-- [ ] underflow — pop이 push보다 많을 때 commitStack fallback 동작
-- [ ] redirect 인접 cycle ret — redirect 직후 cycle의 ret가 올바른 주소를 사용하는지
-- [ ] PopAndPush (return-and-call) 명령어 처리 (현재 미처리 확인 필요)
+- [x] Basic call/ret — ret pop after call push
+- [x] nested call/ret — push 2 times and then pop 2 times
+- [ ] Overflow boundary — specNearOverflow=true, suppress push/pop when calling exceeds SpecQueueSize(32)
+- [ ] underflow — commitStack fallback action when pops exceed pushes
+- [ ] redirect adjacent cycle ret — Ensures that the ret of the cycle immediately after the redirect uses the correct address.
+- [ ] PopAndPush (return-and-call) command processing (currently unprocessed confirmation required)
 
-### 다중 이벤트 케이스
+### Multi-event case
 
-| 케이스 | 기대 동작 | 검증 포인트 |
+| case | Expected Behavior | Verification points |
 |---|---|---|
-| `call_call` 동일 블록 | 첫 call만 push | 두 번째 call ret addr 누락 확인 |
-| `call_ret` 동일 블록 | call만 처리 (첫 taken 기준) | S3에서 어떤 분기가 selected되는지 |
-| `ret_ret` 동일 블록 | 첫 ret만 pop | 두 번째 ret mispredict 발생률 |
-| `ret_call` 동일 블록 | ret만 처리 | 동일 |
+| `call_call` same block | push only the first call | Check for missing second call ret addr |
+| `call_ret` same block | Process only calls (based on first taken) | Which branch is selected in S3 |
+| `ret_ret` same block | pop only the first ret | Second ret mispredict incidence |
+| `ret_call` same block | Process only ret | Same |
 
-### RAS/ITTAGE 우선순위 케이스
+### RAS/ITTAGE priority cases
 
-- [ ] `isReturn=true` 분기 예측 시 RAS만 사용, ITTAGE 무시 확인
-- [ ] `isIndirect && !hasPop` 분기에서 ITTAGE hit 시 ITTAGE 사용 확인
+- [ ] `isReturn=true` Only use RAS when predicting branch, check ITTAGE is ignored
+- [ ] Confirm the use of ITTAGE when ITTAGE is hit in the `isIndirect && !hasPop` branch
 
-### Overflow/Recovery 케이스
+### Overflow/Recovery Case
 
-- [ ] overflow 중 redirect → `stack.redirect.valid` 억제 조건 검증
-- [ ] MicroRas redirect 직후 1 cycle 동안 `isCanUse=false` 확인 (`redirectDelay1`)
+- [ ] redirect during overflow → `stack.redirect.valid` suppression condition verification
+- [ ] Check `isCanUse=false` for 1 cycle immediately after MicroRas redirect (`redirectDelay1`)
 
-### Commit port 케이스
+### Commit port case
 
-- [ ] 연속 commit push → specQueue slot 재사용 시 주소 정확성 확인
-- [ ] commitStack 단일 write port — 동시 push/pop 없음 확인 (둘 중 하나만 활성화)
-
----
-
-## 6) 기능 체크리스트
-
-- [x] Call/Ret 판별 정확성 — RISC-V spec Table 3 기반 구현 확인
-- [x] Push 주소 계산 — `alignedPC + (cfiPosition<<1) + 2` (compressed ISA 2바이트 기준)
-- [x] Speculative update — S3-fire 기반 즉각 포인터 업데이트
-- [x] Redirect rollback — checkpoint 기반 포인터 복원 + re-push/pop
-- [~] Overflow 처리 — specNearOverflow 시 push/pop 억제 (redirect 억제 문제 존재)
-- [x] ITTAGE 동시 hit 우선순위 — RAS > ITTAGE 명확히 구현됨
-- [x] Commit stack 분리 유지
-- [!] PopAndPush (return-and-call) — 현재 처리되지 않음 (RAS-007)
-- [!] 다중 call/ret 동시 처리 — 미지원 (단일 이벤트만)
-- [x] 연속 prediction 실패 복구 — redirect마다 checkpoint로 복원 (overflow 예외 주의)
+- [ ] Continuous commit push → Check address accuracy when reusing specQueue slot
+- [ ] commitStack single write port — ensure no concurrent pushes/pops (only one of them active)
 
 ---
 
-*분석 기준 파일: `src/main/scala/xiangshan/frontend/bpu/ras/` 전체 + `Bpu.scala` + `Bundles.scala`*
-*코드 커밋: `bfbb21862` (branch: `kunminghu-v3`)*
+## 6) Feature Checklist
+
+- [x] Call/Ret discrimination accuracy — Check implementation based on RISC-V spec Table 3
+- [x] Push address calculation — `alignedPC + (cfiPosition<<1) + 2` (based on compressed ISA 2 bytes)
+- [x] Speculative update — S3-fire based immediate pointer update
+- [x] Redirect rollback — checkpoint-based pointer restoration + re-push/pop
+- [~] Overflow handling — push/pop suppression during specNearOverflow (redirect suppression problem exists)
+- [x] ITTAGE concurrent hit priority — RAS > ITTAGE clearly implemented
+- [x] Maintain Commit stack separation
+- [!] PopAndPush (return-and-call) — Currently unhandled (RAS-007)
+- [!] Multiple call/ret simultaneous processing — not supported (single event only)
+- [x] Recovery from consecutive prediction failures — Restore to checkpoint for each redirect (beware of overflow exception)
+
+---
+
+*Analysis standard file: `src/main/scala/xiangshan/frontend/bpu/ras/` all + `Bpu.scala` + `Bundles.scala`*
+*Code commit: `bfbb21862` (branch: `kunminghu-v3`)*

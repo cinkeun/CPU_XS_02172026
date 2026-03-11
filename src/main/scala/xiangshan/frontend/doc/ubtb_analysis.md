@@ -1,20 +1,20 @@
-# ubtb (MicroBtb) 분석
+# ubtb (MicroBtb) analysis
 
-> 분석 기준: BTB_analysis_rule.md
-> 분석 대상: `src/main/scala/xiangshan/frontend/bpu/ubtb/`
-> Code-based only — 사전 지식/web-search 사용 금지
+> Analysis criteria: BTB_analysis_rule.md
+> Analysis target: `src/main/scala/xiangshan/frontend/bpu/ubtb/`
+> Code-based only — No use of prior knowledge/web-search
 
 ---
 
-## 1.1 BTB 종류 및 역할
+## 1.1 BTB types and roles
 
-MicroBtb는 **Block-type BTB**로, 현재 입력 fetch block에서 첫 번째 taken branch를 예측한다.
-Fully-associative 구조이며, hit 시 항상 taken(`io.prediction.bits.taken := s1_hit`)으로 처리한다.
-예측 거리는 **현재 block의 "다음 block"** 이다 (lookahead 아님).
+MicroBtb is **Block-type BTB**, which predicts the first branch taken from the current input fetch block.
+It is a fully-associative structure, and when hit, it is always processed as taken(`io.prediction.bits.taken := s1_hit`).
+The prediction distance is **the "next block"** of the current block (not lookahead).
 
-| BTB  | Type   | Block Width          | Predict Distance                | 설명 |
+| BTB | Type | Block Width | Predict Distance | Description |
 |------|--------|----------------------|---------------------------------|------|
-| ubtb | Block  | FetchBlockSize (bytes) | 현재 block → 다음 block (s1 출력) | 32-entry fully-associative, 항상 taken 예측 |
+| ubtb | Block | FetchBlockSize (bytes) | Current block → next block (s1 output) | 32-entry fully-associative, always taken predictions |
 
 ```
 // Source: ubtb/MicroBtb.scala:78-83
@@ -30,7 +30,7 @@ io.prediction.bits.attribute   := s1_hitEntry.slot1.attribute
 
 ## 1.2 BTB memory spec
 
-MicroBtb는 **SRAM이 아닌 레지스터 배열**로 구현된다.
+MicroBtb is implemented as a register array, not **SRAM**.
 
 ```scala
 // Source: ubtb/MicroBtb.scala:49
@@ -39,36 +39,36 @@ private val entries = RegInit(VecInit(Seq.fill(NumEntries)(0.U.asTypeOf(new Micr
 
 | Memory    | Depth       | Width (bit)                         | Banks | Read Ports | Write Ports |
 |-----------|-------------|-------------------------------------|-------|------------|-------------|
-| entries   | 32 (NumEntries) | tag(22) + usefulCnt(2) + slot1 + slot2 | 1 (full-assoc) | 32 (병렬 전체 read) | 1 (선택된 entry write-back) |
+| entries | 32 (NumEntries) | tag(22) + usefulCnt(2) + slot1 + slot2 | 1 (full-assoc) | 32 (parallel full read) | 1 (selected entry write-back) |
 
 - slot1 width: position(CfiPositionWidth) + attribute(4) + target(22) + isStaticTarget(1)
 - slot2 width: valid(1) + position(CfiPositionWidth) + attribute(4) + target(22) + taken(1)
 - BranchAttribute: branchType(2-bit EnumUInt(4)) + rasAction(2-bit EnumUInt(4)) = 4 bit
-- CfiPositionWidth = FetchBlockSizeWidth = log2Ceil(FetchBlockSize) [파라미터 의존]
+- CfiPositionWidth = FetchBlockSizeWidth = log2Ceil(FetchBlockSize) [parameter dependent]
 
 ---
 
-## 1.3 BTB memory entry 설명
+## 1.3 BTB memory entry description
 
 ```scala
 // Source: ubtb/Bundles.scala:32-66
 class MicroBtbEntry(implicit p: Parameters) extends MicroBtbBundle {
   class SlotBase extends Bundle {
-    val position: UInt  = UInt(CfiPositionWidth.W)     // fetch block 내 branch 위치
+val position: UInt = UInt(CfiPositionWidth.W) // branch position in fetch block
     val attribute: BranchAttribute = new BranchAttribute
     val target: UInt    = UInt(TargetWidth.W)           // 22-bit partial target
     val targetCarry: Option[TargetCarry] = if (EnableTargetFix) Option(new TargetCarry) else None
   }
   class Slot1 extends SlotBase {
-    val isStaticTarget: Bool = Bool()  // 항상 같은 target으로 이동하는지 여부
+val isStaticTarget: Bool = Bool() // Whether it always moves to the same target
   }
   class Slot2 extends SlotBase {
-    val valid: Bool = Bool()   // slot2 유효 여부
-    val taken: Bool = Bool()   // slot2 branch 예측 방향
+val valid: Bool = Bool() // Is slot2 valid?
+val taken: Bool = Bool() // slot2 branch prediction direction
   }
   def valid: Bool = !usefulCnt.isSaturateNegative  // usefulCnt > min → valid
   val tag: UInt       = UInt(TagWidth.W)            // 22-bit partial vTag
-  val usefulCnt: SaturateCounter = UsefulCounter()  // 2-bit 포화 카운터 (useful 여부 판단)
+val usefulCnt: SaturateCounter = UsefulCounter() // 2-bit saturation counter (determines whether it is useful)
   val slot1: Slot1 = new Slot1
   val slot2: Slot2 = new Slot2
 }
@@ -76,20 +76,20 @@ class MicroBtbEntry(implicit p: Parameters) extends MicroBtbBundle {
 
 | Field Name            | Width (bit)         | Description |
 |-----------------------|---------------------|-------------|
-| tag                   | 22 (TagWidth)       | PC[instOffsetBits + TagWidth - 1 : instOffsetBits], tag 비교용 |
-| usefulCnt             | 2 (UsefulCntWidth)  | 포화 카운터; 최솟값 = invalid entry |
-| slot1.position        | CfiPositionWidth    | fetch block 내 첫 번째 branch 위치 |
-| slot1.attribute       | 4                   | BranchAttribute (branchType 2-bit + rasAction 2-bit) — 상세는 아래 참고 |
-| slot1.target          | 22 (TargetWidth)    | target 하위 비트; 상위는 startPc에서 파생 |
-| slot1.isStaticTarget  | 1                   | true = 동일 target만 본 경우 (dynamic target tracking) |
-| slot1.targetCarry     | 2 (opt)             | EnableTargetFix=false 기본값 → 미포함 |
-| slot2.valid           | 1                   | slot2 사용 여부 (현재 TODO 상태) |
-| slot2.position        | CfiPositionWidth    | 두 번째 branch 위치 |
-| slot2.attribute       | 4                   | 두 번째 branch 속성 |
-| slot2.target          | 22                  | 두 번째 branch target 하위 |
-| slot2.taken           | 1                   | 두 번째 branch 방향 |
+| tag | 22 (TagWidth) | PC[instOffsetBits + TagWidth - 1 : instOffsetBits], for tag comparison |
+| usefulCnt | 2 (UsefulCntWidth) | saturation counter; min = invalid entry |
+| slot1.position | CfiPositionWidth | First branch location in fetch block |
+| slot1.attribute | 4 | BranchAttribute (branchType 2-bit + rasAction 2-bit) — See below for details |
+| slot1.target | 22 (TargetWidth) | target low bit; parent derives from startPc |
+| slot1.isStaticTarget | 1 | true = When only the same target is seen (dynamic target tracking) |
+| slot1.targetCarry | 2 (opt) | EnableTargetFix=false default → not included |
+| slot2.valid | 1 | Whether to use slot2 (current TODO status) |
+| slot2.position | CfiPositionWidth | Second branch location |
+| slot2.attribute | 4 | second branch attribute |
+| slot2.target | 22 | Second branch target child |
+| slot2.taken | 1 | Second branch direction |
 
-### BranchAttribute 인코딩 (4-bit)
+### BranchAttribute encoding (4-bit)
 
 ```scala
 // Source: bpu/Bundles.scala:37-140
@@ -100,15 +100,15 @@ class BranchAttribute extends Bundle {
 
 object BranchAttribute {
   object BranchType extends EnumUInt(4) {  // width = ceil(log2(4)) = 2 bit
-    def None:        UInt = 0.U  // 0b00 — branch 아님 (fallthrough)
+def None: UInt = 0.U // 0b00 — not branch (fallthrough)
     def Conditional: UInt = 1.U  // 0b01 — beq/bne/blt/bge/bltu/bgeu
-    def Direct:      UInt = 2.U  // 0b10 — j/jal (고정 offset)
-    def Indirect:    UInt = 3.U  // 0b11 — jr/jalr (레지스터 기반)
+def Direct: UInt = 2.U // 0b10 — j/jal (fixed offset)
+def Indirect: UInt = 3.U // 0b11 — jr/jalr (register-based)
   }
   object RasAction extends EnumUInt(4) {  // width = 2 bit
     def popBit  = 0  // bit[0]: pop (return)
     def pushBit = 1  // bit[1]: push (call)
-    def None:       UInt = 0.U  // 0b00 — RAS 동작 없음
+def None: UInt = 0.U // 0b00 — No RAS action
     def Pop:        UInt = 1.U  // 0b01 — return (rs=x1/x5, rd≠rs)
     def Push:       UInt = 2.U  // 0b10 — call  (rd=x1/x5)
     def PopAndPush: UInt = 3.U  // 0b11 — return & call (rs=rd=x1/x5, rs≠rd)
@@ -116,7 +116,7 @@ object BranchAttribute {
 }
 ```
 
-**bit 레이아웃 (Chisel Bundle: 먼저 선언된 필드가 LSB)**
+**bit layout (Chisel Bundle: first declared field is LSB)**
 
 ```
 bit[3]  bit[2]  bit[1]  bit[0]
@@ -124,34 +124,34 @@ bit[3]  bit[2]  bit[1]  bit[0]
   (push)          (pop)
 ```
 
-**유효한 조합 목록 (decode 결과)**
+**List of valid combinations (decode results)**
 
-| 이름          | branchType [1:0] | rasAction [3:2] | 4-bit (hex) | 조건 (RISC-V)                               | needIttage |
+| name | branchType [1:0] | rasAction [3:2] | 4-bit (hex) | Conditions (RISC-V) | needIttage |
 |---------------|------------------|-----------------|-------------|---------------------------------------------|------------|
-| None          | 00               | 00              | 0x0         | branch 아님                                 | false      |
+| None | 00 | 00 | 0x0 | not branch | false |
 | Conditional   | 01               | 00              | 0x1         | beq/bne/blt/bge/bltu/bgeu                  | false      |
-| OtherDirect   | 10               | 00              | 0x2         | j/jal (rd≠x1/x5 또는 RVC j/jr)             | false      |
+| OtherDirect | 10 | 00 | 0x2 | j/jal (rd≠x1/x5 or RVC j/jr) | false |
 | DirectCall    | 10               | 10              | 0xA         | jal with rd=x1/x5                           | false      |
 | OtherIndirect | 11               | 00              | 0x3         | jalr, rd≠x1/x5, rs≠x1/x5                  | **true**   |
 | Return        | 11               | 01              | 0x7         | jalr, rs=x1/x5, rd≠rs                      | false      |
-| IndirectCall  | 11               | 10              | 0xB         | jalr, rd=x1/x5, rs≠x1/x5 (또는 rs≠rd)     | **true**   |
+| IndirectCall | 11 | 10 | 0xB | jalr, rd=x1/x5, rs≠x1/x5 (or rs≠rd) | **true** |
 | ReturnAndCall | 11               | 11              | 0xF         | jalr, rd=x1/x5, rs=x1/x5, rs≠rd            | false      |
 
 ```scala
 // Source: bpu/Bundles.scala:60
-def needIttage: Bool = isIndirect && !hasPop  // OtherIndirect + IndirectCall만 해당
+def needIttage: Bool = isIndirect && !hasPop // OtherIndirect + IndirectCall only
 // hasPop = rasAction(popBit) = rasAction[0]
 ```
 
-**predictor별 attribute 활용 요약**
+**Summary of attribute usage by predictor**
 
-| 판단 메서드        | 조건                        | ubtb 활용 위치 |
+| judgment method | Conditions | ubtb utilization location |
 |--------------------|-----------------------------|----------------|
-| `isConditional`    | branchType == 01            | taken 여부를 utage로 override |
-| `isDirect`         | branchType == 10            | 항상 taken으로 예측 |
-| `isIndirect`       | branchType == 11            | 항상 taken; needIttage이면 s3에서 ITTage로 target 교체 |
-| `isReturn`/`hasPop`| rasAction[0] == 1           | s1에서 uras.retTarget으로 target 교체 |
-| `isCall`/`hasPush` | rasAction[1] == 1           | RAS push (ras 모듈에서 처리) |
+| `isConditional` | branchType == 01 | override taken or not by utage |
+| `isDirect` | branchType == 10 | Always taken as predicted |
+| `isIndirect` | branchType == 11 | always taken; If needIttage, replace target from s3 to ITTage |
+| `isReturn`/`hasPop`| rasAction[0] == 1 | Replace target with uras.retTarget in s1 |
+| `isCall`/`hasPush` | rasAction[1] == 1 | RAS push (processed by ras module) |
 
 ---
 
@@ -174,13 +174,13 @@ private val s1_takenMask = VecInit(s1_btbPrediction.zipWithIndex.map { case (pre
 })
 ```
 
-| BTB  | Paired Unit       | 역할                              | 결합 방식 |
+| BTB | Paired Unit | Role | Combination method |
 |------|-------------------|-----------------------------------|-----------|
-| ubtb | MicroTage (utage) | 조건부 branch 방향 결정 (override) | ubtb hit + position 일치 시 utage.taken 사용 |
-| ubtb | -                 | 직접/간접 branch 타겟              | ubtb의 target을 그대로 사용 |
+| ubtb | MicroTage (utage) | Conditional branch direction determination (override) | When matching ubtb hit + position, use utage.taken |
+| ubtb | - | Direct/indirect branch target | Use ubtb’s target as is |
 
-- MicroTage가 hit (position 일치)하면 ubtb의 taken 비트를 utage의 taken으로 교체
-- MicroRas (uras)도 s1에서 return address를 교체할 수 있음
+- If MicroTage hits (position matches), replace the taken bit of ubtb with the taken of utage.
+- MicroRas (uras) can also replace the return address in s1.
 
 ```scala
 // Source: bpu/Bpu.scala:307-309
@@ -192,7 +192,7 @@ when(s1_isRet && uras.io.specOut.isCanUse) {
 
 ---
 
-## 1.5 다음 예측 pseudocode
+## 1.5 Next prediction pseudocode
 
 ```text
 onPredict(startPc):
@@ -202,20 +202,20 @@ onPredict(startPc):
   // s1: full-associative tag compare
   s1_tag = getTag(s1_startPc)         // PC[instOffsetBits + TagWidth - 1 : instOffsetBits]
   s1_hitOH = entries.map(e => e.valid && e.tag === s1_tag)  // valid = usefulCnt > min
-  assert(PopCount(s1_hitOH) <= 1)     // 최대 1-hot
+assert(PopCount(s1_hitOH) <= 1) // max 1-hot
 
   if s1_hitOH.orR:
     hit = true
     hitEntry = entries(OHToUInt(s1_hitOH))
     output.valid      = true
-    output.taken      = true           // 항상 taken
+output.taken = true // always taken
     output.cfiPosition = hitEntry.slot1.position
     output.target     = getFullTarget(s1_startPc, hitEntry.slot1.target)
     output.attribute  = hitEntry.slot1.attribute
   else:
     output.valid = false
 
-  // BPU top에서 utage가 conditional branch 방향 override 가능
+// utage can override the conditional branch direction at the BPU top
   if utage.prediction.valid && utage.position == output.cfiPosition:
     output.taken (effective) = utage.taken
 
@@ -225,24 +225,24 @@ onPredict(startPc):
 
 ---
 
-## 1.6 Input-to-output latency 및 throughput
+## 1.6 Input-to-output latency and throughput
 
 | BTB  | Input Stage | Output Stage | Latency (cycle) | Throughput (pred/cycle) |
 |------|-------------|--------------|-----------------|--------------------------|
 | ubtb | s0 (startPc) | s1 (prediction valid) | 1 | 1 |
 
-- s0에서 startPc를 RegEnable로 래치하고, s1에서 32-entry 병렬 비교 후 1사이클 내 출력
-- 레지스터 기반이므로 SRAM read latency 없음 → 1-cycle 예측
+- Latch startPc with RegEnable in s0, and output within 1 cycle after 32-entry parallel comparison in s1.
+- No SRAM read latency because it is register-based → 1-cycle prediction
 
 ---
 
-## 1.7 Pipeline stage 위치
+## 1.7 Pipeline stage location
 
 | Signal               | Produced @ Stage | Consumed @ Stage | Timing Note |
 |----------------------|------------------|------------------|-------------|
-| s0_startPc           | BPU s0           | ubtb s0          | io.startPc 직결 |
+| s0_startPc | BPU s0 | ubtb s0 | io.startPc direct connection |
 | s1_startPc           | ubtb s0 → s1     | ubtb s1          | `RegEnable(s0_startPc, s0_fire)` |
-| s1_hitOH / s1_hit    | ubtb s1          | ubtb s1          | 레지스터 entries 조합 논리 |
+| s1_hitOH / s1_hit | ubtb s1 | ubtb s1 | register entries combinational logic |
 | io.prediction        | ubtb s1          | BPU s1           | valid := s1_hit |
 | s1_btbPrediction[0]  | BPU s1           | BPU s1           | VecInit(ubtb.io.prediction) ++ abtb.io.prediction |
 
@@ -258,18 +258,18 @@ private val s1_hitEntry = entries(s1_hitIdx)
 
 ---
 
-## 1.8 BTB memory indexing hashing 방법
+## 1.8 BTB memory indexing hashing method
 
-### 구조: 완전 연관 (Fully-Associative), index 없음
+### Structure: Fully-Associative, no index
 
-ubtb는 완전 연관 register-file 구조이므로 setIdx / bankIdx가 없다.
-32개 entry 전체를 병렬 tag 비교하여 hit를 결정한다.
+ubtb has a fully associative register-file structure, so there is no setIdx / bankIdx.
+The hit is determined by parallel tag comparison of all 32 entries.
 
 ```scala
 // Source: ubtb/Helpers.scala:25-34
 val addrFields = AddrField(
   Seq(
-    ("instOffset", instOffsetBits),  // PC bit [0:0], 항상 0 (2B 정렬)
+("instOffset", instOffsetBits), // PC bit [0:0], always 0 (2B aligned)
     ("tag", TagWidth)                // PC bit [22:1]  (TagWidth=22)
   ),
   maxWidth = Option(VAddrBits),
@@ -279,7 +279,7 @@ val addrFields = AddrField(
 )
 ```
 
-### tag 계산식
+### tag calculation formula
 
 ```scala
 // Source: ubtb/Helpers.scala:36-37
@@ -289,34 +289,34 @@ def getTag(pc: PrunedAddr): UInt =
 //       = pc[1 + 22 - 1 : 1] = pc[22:1]
 ```
 
-- history 사용: **없음**
-- hash 없음 (XOR/fold 미적용), PC 단순 bit extraction
+- Use history: **None**
+- No hash (XOR/fold not applied), PC simple bit extraction
 
 | Path | Field | Formula | PC Bits | History | Note |
 |------|-------|---------|---------|---------|------|
-| Predict (s1) | tag | pc[22:1] | [22:1] | 없음 | s1_startPc |
-| Train (t0) | tag | pc[22:1] | [22:1] | 없음 | fastTrain.startPc |
+| Predict (s1) | tag | pc[22:1] | [22:1] | None | s1_startPc |
+| Train (t0) | tag | pc[22:1] | [22:1] | None | fastTrain.startPc |
 
-> Predict path와 Train path 모두 동일한 formula 사용.
-> instOffset (bit [0]) 은 2B 정렬로 항상 0 — 분류에 사용하지 않음.
+> Use the same formula for both Predict path and Train path.
+> instOffset (bit [0]) is always 0 for 2B sorting — not used for sorting.
 
 ---
 
-## 1.9 Training 방법
+## 1.9 Training method
 
-### fast-train trigger 조건
+### fast-train trigger condition
 
 ```scala
 // Source: ubtb/MicroBtb.scala:102-117
 if (UseFastTrain) {
-  t0_fire        := io.fastTrain.get.valid && io.enable   // ← 조건 핵심
+t0_fire := io.fastTrain.get.valid && io.enable // ← Condition key
   t0_startPc     := io.fastTrain.get.bits.startPc
   t0_actualTaken := io.fastTrain.get.bits.finalPrediction.taken
   t0_position    := io.fastTrain.get.bits.finalPrediction.cfiPosition
   t0_fullTarget  := io.fastTrain.get.bits.finalPrediction.target
   t0_attribute   := io.fastTrain.get.bits.finalPrediction.attribute
 } else {
-  // slow mode: mispredict가 있는 FTQ commit에서만 train
+// slow mode: train only on FTQ commits with mispredict
   t0_fire        := io.stageCtrl.t0_fire && io.train.mispredictBranch.valid && io.enable
   ...
 }
@@ -325,27 +325,27 @@ if (UseFastTrain) {
 ```scala
 // Source: bpu/Bpu.scala:182-188
 private val fastTrain = Wire(Valid(new BpuFastTrain))
-fastTrain.valid                := s3_valid               // ← BPU s3 파이프라인이 유효한 매 사이클
+fastTrain.valid := s3_valid // ← Every cycle the BPU s3 pipeline is valid
 fastTrain.bits.startPc         := s3_startPc
-fastTrain.bits.finalPrediction := s3_prediction          // mbtb+Tage+Sc+ITTage+RAS 최종 결합 결과
+fastTrain.bits.finalPrediction := s3_prediction // mbtb+Tage+Sc+ITTage+RAS final combined result
 fastTrain.bits.abtbMeta        := s3_abtbMeta
 fastTrain.bits.utageMeta       := s3_utageMeta
 fastTrain.bits.hasOverride     := s3_override
 ```
 
-**fast-train이 fire하는 조건: `s3_valid == true` (BPU s3 파이프라인 유효)**
+**Condition for fast-train to fire: `s3_valid == true` (BPU s3 pipeline valid)**
 
-즉, ubtb는 **taken/not-taken, mispredict 여부와 무관하게** BPU s3가 valid인 매 사이클 train한다.
-`t0_actualTaken = finalPrediction.taken` 이므로 실제 어떤 동작을 취하는지는 taken 여부로 분기:
+In other words, ubtb trains every cycle when BPU s3 is valid, regardless of **taken/not-taken or mispredict**.
+Since it is `t0_actualTaken = finalPrediction.taken`, the actual action taken depends on whether or not it was taken:
 
-| 조건                        | t0_fire | t0_actualTaken | t1에서의 동작 |
+| Conditions | t0_fire | t0_actualTaken | Action at t1 |
 |-----------------------------|---------|----------------|---------------|
-| s3_valid && prediction.taken  | true  | true           | hit → usefulCnt 증감 / miss → allocate |
-| s3_valid && !prediction.taken | true  | false          | hit → usefulCnt 감소 또는 re-init / miss → **아무 것도 안 함** (allocate 조건 불충족) |
-| !s3_valid                   | false   | —              | train 없음 |
+| s3_valid && prediction.taken | true | true | hit → usefulCnt increase/decrease / miss → allocate |
+| s3_valid && !prediction.taken | true | false | hit → usefulCnt decrease or re-init / miss → **do nothing** (allocate condition not met) |
+| !s3_valid | false | — | no train |
 
-> **slow mode 비교**: `io.stageCtrl.t0_fire && mispredictBranch.valid` — mispredict가 있는 commit만 train.
-> FIXME 주석(`// FIXME: not sure if first mispredict is the best, maybe first taken?`)이 있어 아직 설계 확정 전.
+> **Compare slow mode**: `io.stageCtrl.t0_fire && mispredictBranch.valid` — train only commits with mispredicts.
+> There is a FIXME annotation (`// FIXME: not sure if first mispredict is the best, maybe first taken?`), so the design has not yet been confirmed.
 
 ---
 
@@ -353,102 +353,102 @@ fastTrain.bits.hasOverride     := s3_override
 
 ```scala
 // Source: ubtb/MicroBtb.scala:162-228
-t1_fire := RegNext(t0_fire, false.B)   // t0의 1-cycle 지연
+t1_fire := RegNext(t0_fire, false.B) // 1-cycle delay of t0
 
-// t1에서 결정되는 동작 (3가지 케이스)
+// Action determined at t1 (3 cases)
 when(t1_fire) {
   when(!t1_hit) {
-    // case 1: miss → taken인 경우만 새 entry 할당 (initEntryIfNotUseful(true.B))
+// case 1: Assign new entry only if miss → taken (initEntryIfNotUseful(true.B))
     initEntryIfNotUseful(true.B)
   }.elsewhen(!t1_hitAttributeSame || !t1_hitPositionSame || !t1_hitTargetSame || !t1_actualTaken) {
-    // case 2: hit + (position/attribute/target 불일치 OR not-taken)
-    //   - notUseful이면 새 entry로 재초기화
-    //   - useful이면 usefulCnt 감소
-    //   - target 불일치이면 isStaticTarget := false
+// case 2: hit + (position/attribute/target mismatch OR not-taken)
+// - If notUseful, reinitialize with a new entry.
+// - If useful, decrease usefulCnt
+// - If target mismatch, isStaticTarget := false
     initEntryIfNotUseful(t1_hitNotUseful)
     when(!t1_hitTargetSame) { t1_updatedEntry.slot1.isStaticTarget := false.B }
   }.otherwise {
-    // case 3: hit + 모든 필드 일치 + taken → usefulCnt 증가
+// case 3: hit + match all fields + taken → increase usefulCnt
     t1_updatedEntry.usefulCnt := t1_hitEntry.usefulCnt.getIncrease()
   }
 }
 
-// write-back: hit이거나 allocate인 경우만 entries에 반영
-t1_allocate  := !t1_hit && t1_actualTaken          // miss + taken일 때만 신규 할당
+// write-back: reflected in entries only in case of hit or allocate
+t1_allocate := !t1_hit && t1_actualTaken // New allocation only when miss + taken
 t1_updateIdx := Mux(t1_hit, t1_hitIdx, replacer.io.victim)
 when(t1_fire && (t1_hit || t1_allocate)) {
   entries(t1_updateIdx) := t1_updatedEntry
 }
 ```
 
-**entry 초기화 시 usefulCnt**: `resetSaturatePositive()` (최댓값으로 시작, 이후 맞으면 증가/틀리면 감소).
+**usefulCnt** when initializing entry: `resetSaturatePositive()` (starts with maximum value, then increases if correct/decrease if incorrect).
 
 ---
 
-### Victim entry 결정 (MicroBtbReplacer)
+### Victim entry decision (MicroBtbReplacer)
 
 ```scala
 // Source: ubtb/MicroBtbReplacer.scala:38-52
 private val replacer = ReplacementPolicy.fromString(Replacer, NumEntries)  // PLRU (NumEntries=32)
 
-// Step 1: usefulCnt가 최솟값(isSaturateNegative)인 entry 탐색
+// Step 1: Search for the entry where usefulCnt is the minimum value (isSaturateNegative)
 private val notUsefulVec = VecInit(io.usefulCnt.map(_.isSaturateNegative))
 private val notUseful    = notUsefulVec.reduce(_ || _)
-private val notUsefulIdx = PriorityEncoder(notUsefulVec)  // index 0부터 첫 번째 not-useful
+private val notUsefulIdx = PriorityEncoder(notUsefulVec) // first not-useful from index 0
 
-// Step 2: not-useful이 있으면 우선 사용, 없으면 PLRU victim 사용
+// Step 2: If there is not-useful, use it first. If not, use PLRU victim.
 io.victim := Mux(notUseful, notUsefulIdx, replacer.way)
 
-// PLRU 상태 갱신: predict hit과 train touch 둘 다 반영
+// PLRU status update: reflects both predict hit and train touch
 replacer.access(Seq(io.predTouch, io.trainTouch))
-// predTouch:  valid = s1_hit && s1_fire   (예측 시 hit entry touch)
-// trainTouch: valid = t1_fire,  bits = t1_updateIdx  (train 시 갱신된 entry touch)
+// predTouch: valid = s1_hit && s1_fire (hit entry touch when predicting)
+// trainTouch: valid = t1_fire, bits = t1_updateIdx (entry touch updated during train)
 ```
 
-**victim 선택 우선순위 요약**
+**victim selection priority summary**
 
 ```
-priority 1 (우선): notUseful entry 중 가장 낮은 index (PriorityEncoder)
-priority 2 (fallback): PLRU replacer가 지목한 way
+priority 1 (priority): lowest index among notUseful entries (PriorityEncoder)
+priority 2 (fallback): way pointed out by PLRU replacer
 ```
 
-| 상황                               | victim 출처     | 비고 |
+| Situation | victim source | Remarks |
 |------------------------------------|-----------------|------|
-| 하나 이상의 usefulCnt가 최솟값     | PriorityEncoder | index 0부터 스캔, 첫 번째 not-useful 선택 |
-| 모든 entry가 useful                | PLRU .way       | predict touch + train touch로 갱신된 PLRU 트리 기반 |
+| At least one usefulCnt has a minimum | PriorityEncoder | Scan from index 0, select first not-useful |
+| All entries are useful | PLRU .way | Based on PLRU tree updated with predict touch + train touch |
 
-> victim은 `t1_allocate (= !t1_hit && t1_actualTaken)` 조건이 true일 때만 실제로 사용된다.
-> hit인 경우에는 victim을 무시하고 `t1_hitIdx`에 직접 write-back.
+> The victim is actually used only when the `t1_allocate (= !t1_hit && t1_actualTaken)` condition is true.
+> In case of a hit, ignore the victim and write-back directly to `t1_hitIdx`.
 
 ---
 
-### 연속 train 충돌 처리 (t0-t1 hazard)
+### Continuous train collision handling (t0-t1 hazard)
 
-t0와 t1이 연속 발동될 때 데이터 hazard 발생 가능:
+Data hazard may occur when t0 and t1 are triggered consecutively:
 
 ```scala
 // Source: ubtb/MicroBtb.scala:128-148
-// 문제 1: t1이 write 중인 entry를 t0가 아직 반영 안 된 entries[]에서 읽어 miss로 오판 → 잘못된 allocate
-// 문제 2: t1이 t0의 hit entry를 victim으로 선택하여 교체 중 → t0가 miss인 척 해야 함
+// Problem 1: The entry being written by t1 is read from entries[] that t0 has not yet reflected, misjudged as a miss → incorrect allocate
+// Problem 2: t1 selects t0's hit entry as victim and is replacing it → t0 must pretend to be a miss
 private val t0_hitT1Update = Wire(Bool())
 private val t0_hitT1Victim = t1_fire && t0_realHitIdx === replacer.io.victim && t1_allocate
 
-// 최종 hit 판정 보정
+// Final hit judgment correction
 private val t0_hit = t0_realHit && !t0_hitT1Victim || t0_hitT1Update
 
-// t0_hitT1Update: t1이 같은 tag를 갱신 중이면 t0는 t1의 updatedEntry를 "미리 본" 것으로 처리
+// t0_hitT1Update: If t1 is updating the same tag, t0 treats t1's updatedEntry as "previewed"
 t0_hitT1Update := t1_fire && t0_tag === t1_tag && (t1_hit || t1_allocate)
 // → t0_hitEntry = t1_updatedEntry (wire forwarding)
 ```
 
-| 시나리오                                      | 보정 신호         | 효과 |
+| Scenario | correction signal | effect |
 |-----------------------------------------------|-------------------|------|
-| t1이 같은 tag entry를 갱신 중 (t0 뒤따라 도착) | `t0_hitT1Update`  | t0가 t1의 `t1_updatedEntry`를 hit으로 간주 → false miss 방지 |
-| t1이 t0의 hit entry를 victim으로 교체 중       | `t0_hitT1Victim`  | t0의 hit를 강제로 miss 처리 → false hit 방지 |
+| t1 is updating the same tag entry (arriving after t0) | `t0_hitT1Update` | t0 considers t1's `t1_updatedEntry` as a hit → prevent false miss |
+| t1 is replacing t0's hit entry with victim | `t0_hitT1Victim` | Forcibly treat t0's hit as a miss → Prevent false hit |
 
 ---
 
-### Training 입력 정보 경로
+### Training input information path
 
 ```scala
 // Source: ubtb/Bundles.scala:68-70
@@ -459,16 +459,16 @@ class MicroBtbMeta(implicit p: Parameters) extends MicroBtbBundle {
 
 | Trigger                              | Required Info                                                      | Info Path | Write Port / Conflict Handling |
 |--------------------------------------|---------------------------------------------------------------------|-----------|--------------------------------|
-| `s3_valid` (fast-train, 매 s3 사이클) | s3_startPc, finalPrediction (taken, position, target, attribute)   | BPU 내부 `fastTrain` wire (`s3_*` 기반) | 없음 (레지스터 1-port, t1 1회/cycle) |
-| `mispredictBranch.valid` (slow mode) | startPc, mispredictBranch (taken, position, target, attribute)     | FTQ→BPU `io.train` (commit train payload) | 없음 |
+| `s3_valid` (fast-train, every s3 cycle) | s3_startPc, finalPrediction (taken, position, target, attribute) | BPU internal `fastTrain` wire (based on `s3_*`) | None (register 1-port, t1 1 time/cycle) |
+| `mispredictBranch.valid` (slow mode) | startPc, mispredictBranch (taken, position, target, attribute) | FTQ→BPU `io.train` (commit train payload) | None |
 
-- **MicroBtbMeta는 현재 미사용** (reserved for future use) → uBTB 전용 meta 저장/소비 경로 없음
+- **MicroBtbMeta is currently not used** (reserved for future use) → No meta storage/consumption path dedicated to uBTB
 
 ---
 
-## 1.10 Override 및 redirection
+## 1.10 Override and redirection
 
-### 우선순위 규칙
+### Priority rules
 
 ```scala
 // Source: bpu/Bpu.scala:237-241, 380, 434-441
@@ -481,9 +481,9 @@ s3_override := s3_valid && !(s3_prediction === s3_s1Prediction)
 s0_startPc := MuxCase(
   s0_startPcReg,
   Seq(
-    redirect.valid -> redirect.bits.target,  // 최우선: 백엔드 redirect
-    s3_override    -> s3_prediction.target,  // 2순위: mbtb s3 override
-    s1_valid       -> s1_prediction.target   // 3순위: ubtb/abtb s1 prediction
+redirect.valid -> redirect.bits.target, // priority: backend redirect
+s3_override -> s3_prediction.target, // 2nd priority: mbtb s3 override
+s1_valid -> s1_prediction.target // 3rd priority: ubtb/abtb s1 prediction
   )
 )
 ```
@@ -492,37 +492,37 @@ s0_startPc := MuxCase(
 // Source: bpu/Bpu.scala:415-421
 io.toFtq.prediction.valid := s1_valid && s2_ready || s3_override
 when(s3_override) {
-  io.toFtq.prediction.bits.fromStage(s3_startPc, s3_prediction)  // mbtb 결과 사용
+io.toFtq.prediction.bits.fromStage(s3_startPc, s3_prediction) // Use mbtb result
 }.otherwise {
-  io.toFtq.prediction.bits.fromStage(s1_startPc, s1_prediction)  // ubtb/abtb 결과 사용
+io.toFtq.prediction.bits.fromStage(s1_startPc, s1_prediction) // Use ubtb/abtb results
 }
 ```
 
 | Condition              | Winner          | Redirect Target       | Side Effect (Flush/Replay) |
 |------------------------|-----------------|-----------------------|----------------------------|
-| redirect.valid         | Backend redirect | redirect.bits.target | s3_flush → 전체 파이프라인 flush |
-| s3_override (mbtb ≠ s1) | mbtb s3 결과   | s3_prediction.target  | s2_flush, s1_flush (s1, s2 invalid) |
-| !redirect && !s3_override && s1_taken | uBTB+ABTB 후보 중 first taken(min position) | s1_prediction.target | 없음 |
-| !redirect && !s3_override && !s1_taken | FallThrough | fallthrough target    | 없음 |
+| redirect.valid | Backend redirect | redirect.bits.target | s3_flush → flush entire pipeline |
+| s3_override (mbtb ≠ s1) | mbtb s3 results | s3_prediction.target | s2_flush, s1_flush (s1, s2 invalid) |
+| !redirect && !s3_override && s1_taken | first taken(min position) among uBTB+ABTB candidates | s1_prediction.target | None |
+| !redirect && !s3_override && !s1_taken | FallThrough | fallthrough target | None |
 
-- ubtb miss → FallThroughPredictor가 s1 prediction 담당
-- s3_override 발생 시 FTQ의 기존 s1 entry가 mbtb 결과로 갱신됨 (`s3FtqPtr` 사용)
-- MicroRas (uras)가 return address 교체 가능 (s1에서 동시에 처리)
-- `s1_taken`/`first taken(min position)` 선택은 BPU top의 `s1_takenMask`, `CompareMatrix`, `s1_firstTakenBranch`에서 결정
+- ubtb miss → FallThroughPredictor is in charge of s1 prediction
+- When s3_override occurs, the existing s1 entry in FTQ is updated with the mbtb result (using `s3FtqPtr`)
+- MicroRas (uras) can replace the return address (processed simultaneously in s1)
+- `s1_taken`/`first taken(min position)` selection is decided from `s1_takenMask`, `CompareMatrix`, and `s1_firstTakenBranch` of BPU top.
   (`bpu/Bpu.scala:266-304`)
 
 ---
 
-## 품질 체크리스트
+## Quality Checklist
 
-- [x] 1.1~1.10 순서 준수
-- [x] memory depth/width/banks/read/write ports 명시
-- [x] memory entry 코드 snippet 포함
-- [x] field별 width/description 표 완성
-- [x] pair predictor 결합 규칙 명시 (utage, uras)
-- [x] pseudocode 포함
-- [x] latency/throughput 수치화 (1 cycle, 1 pred/cycle)
-- [x] stage 입력/출력 타이밍 명시
-- [x] indexing/hash 식 + PC/history bit position 명시
-- [x] training trigger/FTQ 저장/meta fields/port conflict 처리 명시
-- [x] override/redirection 우선순위 및 근거 명시
+- [x] Comply with order 1.1~1.10
+- [x] specify memory depth/width/banks/read/write ports
+- [x] Includes memory entry code snippet
+- [x] Completion of width/description table for each field
+- [x] Specify pair predictor combination rules (utage, uras)
+- Includes [x] pseudocode
+- [x] latency/throughput quantification (1 cycle, 1 pred/cycle)
+- [x] stage input/output timing specified
+- [x] indexing/hash expression + PC/history bit position specified
+- [x] Specify training trigger/FTQ storage/meta fields/port conflict processing
+- [x] Override/redirection priority and rationale specified

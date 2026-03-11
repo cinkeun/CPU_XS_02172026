@@ -14,23 +14,23 @@
 
 ## 1. Module Summary
 
-- **역할**: IFU에서 받은 fetch 패킷(최대 PredictWidth개 명령어)을 버퍼링하고, Decode 스테이지로 매 사이클 최대 DecodeWidth개 CtrlFlow를 공급한다. IBuffer full 시 fetch를 back-pressure하고, flush 시 전체 초기화한다.
-- **위치**: `Frontend.scala` → `Module(new IBuffer)` (FrontendInlinedImp 내부)
-- **Pipeline stage 수**: 1 register stage (Output Reg) + bypass 경로
+- **Role**: Buffers fetch packets (up to PredictWidth commands) received from IFU and supplies up to DecodeWidth number of CtrlFlows to the Decode stage every cycle. When IBuffer is full, fetch back-pressures, and when flush, it is fully initialized.
+- **Position**: `Frontend.scala` → `Module(new IBuffer)` (inside FrontendInlinedImp)
+- **Pipeline stage number**: 1 register stage (Output Reg) + bypass path
 
 ---
 
 ## 2. Key Parameters
 
-| Parameter   | Source                              | Default | 영향                                       |
+| Parameter | Source | Default | Impact |
 | ----------- | ----------------------------------- | ------- | ------------------------------------------ |
-| IBufSize    | `p(XSCoreParamsKey).IBufSize`       | 48      | 총 버퍼 엔트리 수 (IBufNBank × bankSize)   |
-| IBufNBank   | `p(XSCoreParamsKey).IBufNBank`      | 6       | 뱅크 수 (≥ DecodeWidth 필요)              |
-| PredictWidth| `HasXSParameter.PredictWidth`       | 16      | 한 사이클 최대 enqueue 명령어 수           |
-| DecodeWidth | `p(XSCoreParamsKey).DecodeWidth`    | 6       | 한 사이클 최대 dequeue 명령어 수           |
-| bankSize    | `IBufSize / IBufNBank`              | 8       | 뱅크 1개당 엔트리 수                       |
+| IBufSize | `p(XSCoreParamsKey).IBufSize` | 48 | Total number of buffer entries (IBufNBank × bankSize) |
+| IBufNBank | `p(XSCoreParamsKey).IBufNBank` | 6 | Number of banks (requires ≥ DecodeWidth) |
+| PredictWidth| `HasXSParameter.PredictWidth` | 16 | Maximum number of enqueue instructions in one cycle |
+| DecodeWidth | `p(XSCoreParamsKey).DecodeWidth` | 6 | Maximum number of dequeue instructions in one cycle |
+| bankSize | `IBufSize / IBufNBank` | 8 | Number of entries per bank |
 
-제약: `IBufSize % IBufNBank == 0`, `IBufNBank >= DecodeWidth`
+Constraints: `IBufSize % IBufNBank == 0`, `IBufNBank >= DecodeWidth`
 
 ---
 
@@ -38,29 +38,29 @@
 
 | Port                     | Dir | Bitwidth          | Protocol  | Description                              |
 | ------------------------ | --- | ----------------- | --------- | ---------------------------------------- |
-| `io.in`                  | in  | FetchToIBuffer    | Decoupled | IFU → IBuffer (PredictWidth개 명령어)    |
-| `io.out(i)`              | out | CtrlFlow          | Decoupled | IBuffer → Decode (DecodeWidth개)         |
-| `io.flush`               | in  | Bool              | —         | Backend redirect → 전체 flush            |
-| `io.decodeCanAccept`     | in  | Bool              | —         | Decode 수락 가능 여부                    |
-| `io.full`                | out | Bool              | —         | IBuffer full 상태 (`!allowEnq`)          |
-| `io.ControlRedirect`     | in  | Bool              | —         | flush 원인: Control redirect 여부        |
-| `io.ControlBTBMissBubble`| in  | Bool              | —         | flush 원인: BTB Miss bubble              |
-| `io.TAGEMissBubble`      | in  | Bool              | —         | flush 원인: TAGE Miss bubble             |
-| `io.SCMissBubble`        | in  | Bool              | —         | flush 원인: SC Miss bubble               |
-| `io.ITTAGEMissBubble`    | in  | Bool              | —         | flush 원인: ITTAGE Miss bubble           |
-| `io.RASMissBubble`       | in  | Bool              | —         | flush 원인: RAS Miss bubble              |
-| `io.MemVioRedirect`      | in  | Bool              | —         | flush 원인: Memory violation redirect    |
-| `io.stallReason`         | out | StallReasonIO     | —         | TopDown 분석용 stall 원인 벡터           |
+| `io.in` | in | FetchToIBuffer | Decoupled | IFU → IBuffer (PredictWidth commands) |
+| `io.out(i)` | out | CtrlFlow | Decoupled | IBuffer → Decode (DecodeWidth) |
+| `io.flush` | in | Bool | — | Backend redirect → full flush |
+| `io.decodeCanAccept` | in | Bool | — | Decode acceptability |
+| `io.full` | out | Bool | — | IBuffer full status (`!allowEnq`) |
+| `io.ControlRedirect` | in | Bool | — | flush Cause: Control redirect |
+| `io.ControlBTBMissBubble`| in | Bool | — | flush Cause: BTB Miss bubble |
+| `io.TAGEMissBubble` | in | Bool | — | flush Cause: TAGE Miss bubble |
+| `io.SCMissBubble` | in | Bool | — | flush Cause: SC Miss bubble |
+| `io.ITTAGEMissBubble` | in | Bool | — | flush Cause: ITTAGE Miss bubble |
+| `io.RASMissBubble` | in | Bool | — | flush Cause: RAS Miss bubble |
+| `io.MemVioRedirect` | in | Bool | — | flush Cause: Memory violation redirect |
+| `io.stallReason` | out | StallReasonIO | — | Stall cause vector for TopDown analysis |
 
 ---
 
 ## 4. Internal Pipeline / State
 
-### 4.1 버퍼 구조
+### 4.1 Buffer structure
 
 ```
 ibuf: Vec[IBufEntry] = RegInit(VecInit.fill(IBufSize)(0))
-// IBufSize개 레지스터 (SRAM 아님 — 정밀한 R/W 제어 필요)
+// IBufSize registers (not SRAM — requires precise R/W control)
 
 bankedIBufView: Vec[Vec[IBufEntry]] =
   VecInit.tabulate(IBufNBank)(bankID =>
@@ -70,21 +70,21 @@ bankedIBufView: Vec[Vec[IBufEntry]] =
   )
 // bankID=0: ibuf[0, 6, 12, 18, ...]
 // bankID=1: ibuf[1, 7, 13, 19, ...]
-// ... 인터리빙 배치
+// ... interleaving batch
 ```
 
-### 4.2 포인터 구조
+### 4.2 Pointer structure
 
-| 포인터 | 타입 | 역할 |
+| pointer | Type | role |
 | ------- | ---- | ---- |
-| `enqPtrVec(i)` | Vec(PredictWidth, IBufPtr) | enqueue 시 각 위치 포인터 |
+| `enqPtrVec(i)` | Vec(PredictWidth, IBufPtr) | Each location pointer when enqueued |
 | `enqPtr` | IBufPtr | = `enqPtrVec(0)` |
-| `deqPtr` | IBufPtr | dequeue 위치 (절대) |
-| `deqBankPtrVec(i)` | Vec(DecodeWidth, IBufBankPtr) | dequeue 시 뱅크 포인터 |
+| `deqPtr` | IBufPtr | dequeue position (absolute) |
+| `deqBankPtrVec(i)` | Vec(DecodeWidth, IBufBankPtr) | dequeue city bank pointer |
 | `deqBankPtr` | IBufBankPtr | = `deqBankPtrVec(0)` |
-| `deqInBankPtr(b)` | Vec(IBufNBank, IBufInBankPtr) | 뱅크별 내부 포인터 |
+| `deqInBankPtr(b)` | Vec(IBufNBank, IBufInBankPtr) | Internal pointer for each bank |
 
-불변식: `deqPtr.value === deqBankPtr.value + deqInBankPtr(deqBankPtr.value).value × IBufNBank`
+Invariant: `deqPtr.value === deqBankPtr.value + deqInBankPtr(deqBankPtr.value).value × IBufNBank`
 
 ### 4.3 Output Register (1 stage)
 
@@ -93,18 +93,18 @@ val outputEntries = RegInit(VecInit.fill(DecodeWidth)(0.U.asTypeOf(Valid(new IBu
 val outputEntriesValidNum = PriorityMuxDefault(...)
 ```
 
-- Decode로 직접 연결되는 출력 레지스터
-- `decodeCanAccept` 시 전체 교체, `outputEntriesIsNotFull` 시 부분 채움
+- Output register directly connected to Decode
+- Complete replacement at `decodeCanAccept`, partial filling at `outputEntriesIsNotFull`
 
-### 4.4 Bypass 경로
+### 4.4 Bypass route
 
 ```scala
 val useBypass = enqPtr === deqPtr && decodeCanAccept
-// 빈 상태 + Decode 수락 가능 → enqueue 즉시 출력으로 전달 (IBuffer 거치지 않음)
+// Empty state + Decode can be accepted → enqueue immediately passed to output (without going through IBuffer)
 ```
 
-- `bypassEntries`: IFU에서 온 데이터를 직접 OutputEntries로 전달
-- Bypass 시 `numTryEnq = max(0, numFromFetch - DecodeWidth)` — 나머지만 enqueue
+- `bypassEntries`: Pass data from IFU directly to OutputEntries
+- When bypassing, `numTryEnq = max(0, numFromFetch - DecodeWidth)` — enqueue only the rest
 
 ---
 
@@ -113,14 +113,14 @@ val useBypass = enqPtr === deqPtr && decodeCanAccept
 ### 5.1 Enqueue (IFU → IBuffer)
 
 ```
-numFromFetch = PopCount(io.in.bits.enqEnable)  // 실제 유효 명령어 수
+numFromFetch = PopCount(io.in.bits.enqEnable) // Actual number of valid instructions
 io.in.ready  = allowEnq
 
-// 각 PredictWidth 명령어 → 해당 ibuf 인덱스 계산
+// Each PredictWidth command → Calculate the corresponding ibuf index
 enqOffset(i) = PopCount(io.in.bits.valid.take(i))
-// enqPtrVec(enqOffset(i)).value 위치에 write
+// write at enqPtrVec(enqOffset(i)).value location
 
-// bypass: 앞 DecodeWidth개는 bypass, 나머지 enqueue
+// bypass: bypass the first DecodeWidth, enqueue the rest
 when(useBypass):
   numBypass  = min(numFromFetch, DecodeWidth)
   numTryEnq  = max(0, numFromFetch - DecodeWidth)
@@ -129,57 +129,57 @@ else:
   numTryEnq  = numFromFetch
 
 when(io.in.fire && !io.flush):
-  ibuf[enqPtrVec(enqOffset(i) - DecodeWidth + k)].write(enqData(i))  // bypass 제외
+ibuf[enqPtrVec(enqOffset(i) - DecodeWidth + k)].write(enqData(i)) // Excluding bypass
   enqPtrVec += numTryEnq
 ```
 
 ### 5.2 Dequeue (IBuffer → Decode)
 
 ```
-// 2단계 읽기 (면적 최적화)
-// Stage 1: 각 뱅크에서 1엔트리 선택 (bankSize → 1 Mux)
+// 2nd stage read (area optimization)
+// Stage 1: Select 1 entry from each bank (bankSize → 1 Mux)
 readStage1(bankID) = Mux1H(UIntToOH(deqInBankPtr(bankID).value), bankedIBufView(bankID))
 
-// Stage 2: DecodeWidth개 출력 선택 (IBufNBank → 1 Mux)
+// Stage 2: Select DecodeWidth output (IBufNBank → 1 Mux)
 deqEntries(i).bits = Mux1H(UIntToOH(deqBankPtrVec(i).value), readStage1)
 
-// 출력 수 결정
+// Determine number of outputs
 when(decodeCanAccept):
   numOut = min(numValid, DecodeWidth)
-when(outputEntriesIsNotFull):  // outputEntries 마지막이 비어있음
+when(outputEntriesIsNotFull): // outputEntries last is empty
   numOut = min(numValid, DecodeWidth - outputEntriesValidNum)
 else:
   numOut = 0
 
-// 포인터 갱신
+// update pointer
 deqPtr        += numDeq
-deqBankPtrVec += numDeq  // 각 뱅크 포인터 순환
+deqBankPtrVec += numDeq // loop through each bank pointer
 deqInBankPtr(b)+= 1  (bankAdvance = numOut > validIdx)
 ```
 
-### 5.3 Output 레지스터 갱신
+### 5.3 Output register update
 
 ```
 // io.out(i) = outputEntries(i) (Reg)
 when(decodeCanAccept):
   if useBypass && io.in.valid:
-    outputEntries := bypassEntries   // bypass 직접 출력
+outputEntries := bypassEntries // bypass bypass direct output
   else:
-    outputEntries := deqEntries      // 일반 dequeue
+outputEntries := deqEntries // general dequeue
 when(outputEntriesIsNotFull):
-  // 부분 채움: 기존 valid 엔트리 보존 + 새 엔트리 추가
+// Partial filling: Preserve existing valid entries + add new entries
   outputEntries(i).bits = Mux(i < outputEntriesValidNum,
                               old_out, deqEntries(i - outputEntriesValidNum))
 ```
 
-### 5.4 Full 제어
+### 5.4 Full control
 
 ```
 numValidNext = numValid + numEnq - numDeq
 allowEnq     = (IBufSize - PredictWidth).U >= numValidNext
-// 거의 full 시 미리 차단 (PredictWidth 마진 확보)
+// Block in advance when almost full (Securing PredictWidth margin)
 
-io.full = !allowEnq  → io.frontendInfo.ibufFull (Backend TopDown 신호)
+io.full = !allowEnq → io.frontendInfo.ibufFull (Backend TopDown signal)
 ```
 
 ### 5.5 Flush
@@ -187,51 +187,51 @@ io.full = !allowEnq  → io.frontendInfo.ibufFull (Backend TopDown 신호)
 ```
 on io.flush:
   allowEnq      := true.B
-  enqPtrVec     := 0, 1, 2, ... (초기값 복원)
-  deqBankPtrVec := 0, 1, 2, ... (초기값 복원)
-  deqInBankPtr  := 모두 0
+enqPtrVec := 0, 1, 2, ... (restore initial value)
+deqBankPtrVec := 0, 1, 2, ... (restore initial value)
+deqInBankPtr := all 0
   deqPtr        := 0
   outputEntries.foreach(_.valid := false.B)
-// ibuf 레지스터 내용은 유지 (valid 비트 없음, 포인터로 범위 관리)
+// maintain ibuf register contents (no valid bit, range managed by pointer)
 ```
 
 ---
 
 ## 6. Flow / Backpressure Control
 
-| 조건 | 동작 |
+| Conditions | Action |
 | ---- | ---- |
 | IBuffer full (`!allowEnq`) | `io.in.ready = false` → IFU toIbuffer stall → F3 stall → ICache stall |
-| Decode stall (`!decodeCanAccept`) | `numOut = 0` → outputEntries 유지 → deqPtr 이동 없음 |
-| `outputEntriesIsNotFull` | Decode가 일부만 수락 → 나머지를 output reg에 유지 |
-| Bypass 사용 | IBuffer empty + decodeCanAccept → enqueue-dequeue 동시 처리 (1-cycle 절약) |
-| Flush | 즉시 전체 초기화, `allowEnq := true` 복원 |
+| Decode stall (`!decodeCanAccept`) | `numOut = 0` → keep outputEntries → no move deqPtr |
+| `outputEntriesIsNotFull` | Decode accepts only part → keeps the rest in output reg |
+| Use Bypass | IBuffer empty + decodeCanAccept → enqueue-dequeue simultaneous processing (1-cycle saving) |
+| Flush | Immediate full reset, restore `allowEnq := true` |
 
-**back-pressure 전파 경로:**
+**back-pressure propagation path:**
 ```
 Backend not accept → decodeCanAccept=false
-  → numOut=0 → outputEntries 고정
-  → numValidNext 증가 → allowEnq=false
+→ numOut=0 → outputEntries fixed
+→ increase numValidNext → allowEnq=false
   → io.in.ready=false → IFU stall → F3 stall
   → icacheStop=true → ICache stall
-  → FTQ toIfu.req.ready=false → IFU 추가 요청 차단
+→ FTQ toIfu.req.ready=false → Block additional IFU requests
 ```
 
 ---
 
 ## 7. Error / Exception Handling
 
-IBuffer 자체는 예외를 생성하지 않으며, IFU에서 받은 예외 정보를 보존하여 Decode로 전달한다.
+IBuffer itself does not generate exceptions, but preserves the exception information received from IFU and passes it to Decode.
 
-| 예외 정보 | 저장 형태 | 전달 방법 |
+| exception information | Save type | Delivery method |
 | --------- | --------- | --------- |
 | Page Fault (PF) | `IBufferExceptionType.NonCrossPF / CrossPF` | `cf.exceptionVec(instrPageFault) := isPF(...)` |
 | Guest Page Fault (GPF) | `NonCrossGPF / CrossGPF` | `cf.exceptionVec(instrGuestPageFault)` |
 | Access Fault (AF) | `NonCrossAF / CrossAF` | `cf.exceptionVec(instrAccessFault)` |
 | Illegal RVC | `rvcII` | `cf.exceptionVec(EX_II)` |
 | Cross-page IPF fix | `CrossPF` | `cf.crossPageIPFFix := isCrossPage(...)` |
-| Backend exception | `backendException: Bool` | `cf.backendException` 그대로 전달 |
-| Trigger | `TriggerAction()` | `cf.trigger` 그대로 전달 |
+| Backend exception | `backendException: Bool` | `cf.backendException` delivered as is |
+| Trigger | `TriggerAction()` | `cf.trigger` delivered as is |
 
 `IBufferExceptionType` (3-bit):
 ```
@@ -240,11 +240,11 @@ IBuffer 자체는 예외를 생성하지 않으며, IFU에서 받은 예외 정�
 bit[2]: isCrossPage, bit[1:0]: exception type
 ```
 
-### Flush 시 TopDown 분류
+### TopDown classification during flush
 
 ```
 when(io.flush):
-  topdown_stage.reasons := 원인에 따라 설정
+topdown_stage.reasons := set based on causes
   BTBMissBubble  ← ControlBTBMissBubble
   TAGEMissBubble ← TAGEMissBubble
   SCMissBubble   ← SCMissBubble
@@ -260,14 +260,14 @@ io.stallReason.reason(i) := matchBubble  // for wasted decode slots
 
 ## 8. Timing Hints
 
-| Critical Path | 설명 |
+| Critical Path | Description |
 | ------------- | ---- |
-| Enqueue write mux | 각 ibuf 엔트리에 대해 PredictWidth개 중 1개 선택 (`Mux1H(validOH, enqData)`) — IBufSize × PredictWidth Mux |
-| Dequeue 2단계 읽기 | Stage1: bankSize→1 Mux × IBufNBank, Stage2: IBufNBank→1 Mux × DecodeWidth |
-| `enqOffset` PopCount | `PopCount(io.in.bits.valid.take(i))` × PredictWidth — 병렬 prefix sum |
-| `outputEntriesValidNum` | `PriorityMuxDefault(outputEntries.map(_.valid)...)` — DecodeWidth개 우선순위 인코더 |
-| `numValidNext` → `allowEnq` | 덧셈 후 비교 — `io.in.ready` critical path |
-| deqBankPtr 갱신 | `deqBankPtrVec(i) + numDeq` × DecodeWidth — 병렬 circular ptr 덧셈 |
+| Enqueue write mux | For each ibuf entry, select 1 of PredictWidth (`Mux1H(validOH, enqData)`) — IBufSize × PredictWidth Mux |
+| Read Dequeue Step 2 | Stage1: bankSize→1 Mux × IBufNBank, Stage2: IBufNBank→1 Mux × DecodeWidth |
+| `enqOffset` PopCount | `PopCount(io.in.bits.valid.take(i))` × PredictWidth — parallel prefix sum |
+| `outputEntriesValidNum` | `PriorityMuxDefault(outputEntries.map(_.valid)...)` — DecodeWidth priority encoder |
+| `numValidNext` → `allowEnq` | Comparison after addition — `io.in.ready` critical path |
+| deqBankPtr update | `deqBankPtrVec(i) + numDeq` × DecodeWidth — parallel circular ptr addition |
 
 ---
 
@@ -301,7 +301,7 @@ each cycle:
   readStage1(b) = Mux1H(deqInBankPtr(b).value, bankedIBufView(b))
   deqEntries(i) = Mux1H(deqBankPtrVec(i).value, readStage1)
 
-  numOut = ...  // decodeCanAccept / outputEntriesIsNotFull 조건
+numOut = ... // decodeCanAccept / outputEntriesIsNotFull condition
 
   if decodeCanAccept:
     if useBypass && in.valid:
@@ -330,10 +330,10 @@ on flush:
 
 ## 10. Notes / Assumptions
 
-- `ibuf`는 `RegInit` 레지스터 배열 (SRAM 아님) — 정밀한 write 제어와 bypass를 위해 레지스터 사용
-- 뱅크 인터리빙 (`bankID + inBankOffset × IBufNBank`): dequeue 시 각 뱅크에서 최대 1엔트리만 읽어 면적 절감 (IBufNBank:1 Mux + bankSize:1 Mux 두 단계)
-- `allowEnq` 히스테리시스: `(IBufSize - PredictWidth).U >= numValidNext` — 최악 경우(PredictWidth개 동시 enqueue) 오버플로우 방지
-- Output register가 1단 있는 이유: Decode 타이밍 최적화 — `outputEntries` 레지스터에서 combinational 없이 직접 읽기
-- `IBufNBank >= DecodeWidth` 필요 조건: 각 dequeue 슬롯(i)이 서로 다른 뱅크를 읽어야 충돌 없음
-- TopDown `stallReason`: flush 직후 1 사이클 동안 `topdown_stage`에 원인 기록 → Decode의 빈 슬롯에 stall 원인 태깅
-- `headBubble` / `instrHungry`: 직전 flush 후 IBuffer가 비어있는 상태를 구분 (정상적 빈 상태 vs fetch 지연)
+- `ibuf` is `RegInit` register array (not SRAM) — registers are used for precise write control and bypass
+- Bank interleaving (`bankID + inBankOffset × IBufNBank`): When dequeuing, only read a maximum of 1 entry from each bank to save area (IBufNBank:1 Mux + bankSize:1 Mux two steps)
+- `allowEnq` Hysteresis: `(IBufSize - PredictWidth).U >= numValidNext` — Worst case (PredictWidth simultaneous enqueue) overflow prevention
+- Reason for having 1 output register: Decode timing optimization — Direct reading from `outputEntries` register without combinational
+- `IBufNBank >= DecodeWidth` Prerequisite: Each dequeue slot (i) must read a different bank to avoid conflict.
+- TopDown `stallReason`: Record the cause in `topdown_stage` for 1 cycle immediately after flush → Tagging the stall cause in an empty slot in Decode
+- `headBubble` / `instrHungry`: Distinguish between the state in which the IBuffer is empty after the previous flush (normal empty state vs. delayed fetch)

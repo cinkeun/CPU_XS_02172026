@@ -1,19 +1,19 @@
 # TAGE Prediction Unit Analysis
 
-> 분석 원칙: 모든 내용은 **code-based only**. tage/ 디렉토리(Parameters.scala, Abstracts.scala, Bundles.scala, Helpers.scala, TageTable.scala, Tage.scala) 및 bpu/Bundles.scala, bpu/Bpu.scala 코드 기반.
+> Analysis principle: All content is **code-based only**. tage/ directory (Parameters.scala, Abstracts.scala, Bundles.scala, Helpers.scala, TageTable.scala, Tage.scala) and bpu/Bundles.scala, bpu/Bpu.scala code base.
 
 ---
 
-## 1.1 Prediction Unit 종류 및 역할
+## 1.1 Prediction Unit types and roles
 
-TAGE는 **TAgged GEometric history length predictor** 계열의 conditional branch direction predictor이다.  
-`entry 당 1개의 CFI (conditional branch) 방향`을 예측하며, block 내 각 branch position별로 독립적으로 prediction을 생성한다 (`NumBtbResultEntries`개).  
-예측 대상은 현재 입력 block의 **"다음 block"** 예측 (mBTB가 제공하는 branch candidate에 대해 direction 보완).
+TAGE is a conditional branch direction predictor of the **TAgged GEometric history length predictor** series.
+It predicts the direction of one CFI (conditional branch) per entry, and generates predictions independently for each branch position within the block (`NumBtbResultEntries`).
+The prediction target is prediction of the **"next block"** of the current input block (complementary direction to the branch candidate provided by mBTB).
 
-- 8개 테이블: history length 4~397로 기하급수적 증가
-- 예측 로직: 가장 긴 history를 가진 hit table = provider, 그 다음 = alt
-- `useAltOnNa`: provider counter가 weak(약한 saturation)이고 `useAltOnNaVec`이 positive면 alt 사용
-- SC (Statistical Corrector)와 연동: `tage.io.toSc.providerTakenCtrVec`으로 provider counter 전달
+- 8 tables: exponential increase from history length 4 to 397
+- Prediction logic: hit table with longest history = provider, then = alt
+- `useAltOnNa`: If provider counter is weak (weak saturation) and `useAltOnNaVec` is positive, use alt
+- Linked with SC (Statistical Corrector): Provider counter delivered to `tage.io.toSc.providerTakenCtrVec`
 
 ```scala
 // Source: bpu/tage/Tage.scala:149-155
@@ -24,15 +24,15 @@ io.prediction(i).hasAlt       := hasAlt
 io.prediction(i).altPred      := alt.takenCtr.isPositive
 ```
 
-| Unit | Type | CFI per Entry | Predict Distance | 설명 |
+| Unit | Type | CFI per Entry | Predict Distance | Description |
 |------|------|---------------|-----------------|------|
-| TAGE | TAGE (8 tables, geometric history) | 1 conditional branch per position | Next block (per mBTB candidate) | provider/alt 선택, SC 후처리 입력 제공 |
+| TAGE | TAGE (8 tables, geometric history) | 1 conditional branch per position | Next block (per mBTB candidate) | provider/alt selection, provides SC post-processing input |
 
 ---
 
 ## 1.2 Prediction Unit Memory Spec
 
-파라미터 (`Parameters.scala:23-45`):
+Parameter (`Parameters.scala:23-45`):
 
 ```scala
 // Source: bpu/tage/Parameters.scala:24-44
@@ -56,9 +56,9 @@ WriteBufferSize: Int = 4,
 `TageTableInfo(Size, NumWays, HistoryLength)`: Size=4096 = NumSets × NumBanks × NumWays  
 → NumSets = 4096 / (4 banks × 2 ways) = **512 sets per bank**
 
-각 table은:
-- **entrySram**: `SRAMTemplate`, single-port, `NumBanks × NumWays = 4 × 2 = 8`개 SRAM instance
-- **usefulCtrs**: `RegInit` 3차원 배열 (FF-based, SRAM 아님)
+Each table is:
+- **entrySram**: `SRAMTemplate`, single-port, `NumBanks × NumWays = 4 × 2 = 8` SRAM instance
+- **usefulCtrs**: `RegInit` 3D array (FF-based, not SRAM)
 
 ```scala
 // Source: bpu/tage/TageTable.scala:49-73
@@ -74,21 +74,21 @@ private val usefulCtrs = RegInit(
 )
 ```
 
-**Write Buffer**: bank별 1개, size=4, `numPorts=NumWays=2`  
-→ SRAM single-port conflict 완화를 위해 write 요청을 write buffer에서 read가 없을 때 drain
+**Write Buffer**: 1 per bank, size=4, `numPorts=NumWays=2`
+→ To alleviate SRAM single-port conflict, drain the write request when there is no read from the write buffer.
 
 | Memory/Table | Depth | Width (bit) | #Tables | Banks | Read Ports | Write Ports (via WB) |
 |---|---|---|---|---|---|---|
-| entrySram (각 bank, way) | 512 (sets) | 1+13+3 = 17 | 8 | 4 | 1 (shared predict/train, mutex) | 1 (single-port SRAM, via WriteBuffer) |
+| entrySram (each bank, way) | 512 (sets) | 1+13+3 = 17 | 8 | 4 | 1 (shared predict/train, mutex) | 1 (single-port SRAM, via WriteBuffer) |
 | usefulCtrs (FF) | 512 (sets) | 2 | 8 × 4 banks × 2 ways | - | 1 | 1 |
 | useAltOnNaVec | NumUseAltOnNa=128 | 7 | - | - | 1 | 1 |
 | usefulResetCtr | 1 | 8 | - | - | - | 1 |
 
-> predict read / train read가 **동일 SRAM single port**를 공유하므로 `assert(!(predictReadValid && trainReadValid))` — bank conflict 시 `io.trainReady := false`로 stall
+> Since predict read / train read share **same SRAM single port**, `assert(!(predictReadValid && trainReadValid))` — in case of bank conflict, stall to `io.trainReady := false`
 
 ---
 
-## 1.3 Prediction Unit Memory Entry 설명
+## 1.3 Prediction Unit Memory Entry Description
 
 ### TageEntry (SRAM per way)
 
@@ -103,17 +103,17 @@ class TageEntry(implicit p: Parameters) extends TageBundle {
 
 | Field Name | Width (bit) | Description |
 |---|---|---|
-| `valid` | 1 | 엔트리 유효 여부 |
-| `tag` | 13 (`TagWidth`) | PC + position XOR folded history hash 기반 태그 |
+| `valid` | 1 | Entry validity |
+| `tag` | 13 (`TagWidth`) | PC + position XOR folded history hash based tag |
 | `takenCtr` | 3 (`TakenCtrWidth`) | Saturating taken counter |
 
-### 별도 usefulCtrs (FF)
+### Separate usefulCtrs (FF)
 
 | Field Name | Width (bit) | Description |
 |---|---|---|
-| `usefulCtr` | 2 (`UsefulCtrWidth`) | 유용성 카운터, provider가 alt보다 나을 때 increment |
+| `usefulCtr` | 2 (`UsefulCtrWidth`) | Usability counter, when provider is better than alt increment |
 
-### TageMetaEntry (FTQ에 저장하는 meta)
+### TageMetaEntry (meta stored in FTQ)
 
 ```scala
 // Source: bpu/tage/Bundles.scala:108-115
@@ -129,18 +129,18 @@ class TageMetaEntry(implicit p: Parameters) extends TageBundle {
 
 | Field Name | Width (bit) | Description |
 |---|---|---|
-| `useProvider` | 1 | provider 예측 사용 여부 |
-| `providerTableIdx` | 3 | provider table 인덱스 |
-| `providerWayIdx` | 2 | provider way 인덱스 |
-| `providerTakenCtr` | 3 | 예측 시점의 provider counter 값 |
-| `providerUsefulCtr` | 2 | 예측 시점의 provider useful counter 값 |
-| `altOrBasePred` | 1 | alt pred 또는 base(mBTB) pred |
+| `useProvider` | 1 | Whether to use provider prediction |
+| `providerTableIdx` | 3 | provider table index |
+| `providerWayIdx` | 2 | provider way index |
+| `providerTakenCtr` | 3 | provider counter value at the time of prediction |
+| `providerUsefulCtr` | 2 | provider useful counter value at the time of prediction |
+| `altOrBasePred` | 1 | alt pred or base(mBTB) pred |
 
 ---
 
-## 1.4 Pair BTB Unit 설명
+## 1.4 Pair BTB Unit Description
 
-TAGE는 **mBTB (MainBTB)** 와 paired 동작한다.
+TAGE operates paired with **mBTB (MainBTB)**.
 
 ```scala
 // Source: bpu/tage/Tage.scala:38-41
@@ -149,10 +149,10 @@ val fromMainBtb: MainBtbToTageIO = new MainBtbToTageIO
 tage.io.fromMainBtb.result := mbtb.io.result
 ```
 
-- mBTB가 s2에서 branch candidates(`NumBtbResultEntries`개)를 제공
-- TAGE는 각 branch candidate의 `cfiPosition`을 tag에 XOR하여 per-branch 예측 생성
-- mBTB miss 시 base prediction = mBTB entry의 taken 값 → `altOrBasePred`에 저장
-- train 시 TAGE는 mBTB의 `meta.mbtb.entries`를 lookup하여 해당 branch의 counter (base pred) 참조
+- mBTB provides branch candidates (`NumBtbResultEntries`) in s2
+- TAGE generates per-branch predictions by XORing `cfiPosition` of each branch candidate to tag.
+- When mBTB misses, base prediction = taken value of mBTB entry → stored in `altOrBasePred`
+- When training, TAGE looks up `meta.mbtb.entries` of mBTB and refers to the counter (base pred) of the branch.
 
 ```scala
 // Source: bpu/tage/Tage.scala:117-125
@@ -164,28 +164,28 @@ s2_branches.zipWithIndex.foreach { case (branch, i) =>
 }
 ```
 
-| Prediction Unit | Paired BTB | Pairing Purpose | 결합 Stage/Signal |
+| Prediction Unit | Paired BTB | Pairing Purpose | Combined Stage/Signal |
 |---|---|---|---|
-| TAGE | mBTB (MainBTB) | branch candidates 수신, direction 보완, base pred 제공 | s2: `io.fromMainBtb.result` → per-branch tag XOR position, altOrBasePred fallback |
+| TAGE | mBTB (MainBTB) | Receive branch candidates, supplement direction, provide base pred | s2: `io.fromMainBtb.result` → per-branch tag XOR position, altOrBasePred fallback |
 
 ---
 
-## 1.5 다음 예측 Pseudocode (paired BTB 포함)
+## 1.5 Next Prediction Pseudocode (with paired BTB)
 
 ```text
 onPredict(startPc, foldedPathHist, mBTBresult[]):
 
-  // s0: SRAM read request 발송
+// s0: Send SRAM read request
   for each table t:
     bankIdx = getBankIndex(startPc)
     setIdx  = getSetIndex(startPc, t.foldedHist.forIdx)
     t.entrySram[bankIdx].sendReadReq(setIdx)
   
-  // s1: SRAM read resp 수신 (1 cycle latency), rawTag 계산
+// s1: Receive SRAM read resp (1 cycle latency), calculate rawTag
   for each table t:
     rawTag[t] = getTag(startPc) XOR t.foldedHist.forTag
 
-  // s2: mBTB result 수신, per-branch prediction
+// s2: mBTB result reception, per-branch prediction
   for each branch b in mBTBresult:
     position = b.cfiPosition
     useAltOnNa = useAltOnNaVec[getUseAltOnNaIdx(cfiPc(startPc, position))].isPositive
@@ -211,7 +211,7 @@ onPredict(startPc, foldedPathHist, mBTBresult[]):
       altPred      = altPred
 
     output toSc[b]:
-      providerTakenCtr = provider.takenCtr  // SC가 TAGE counter를 참조
+providerTakenCtr = provider.takenCtr // SC refers to TAGE counter
 
     output meta[b]:
       providerTableIdx, providerWayIdx, providerTakenCtr, providerUsefulCtr, altOrBasePred
@@ -219,12 +219,12 @@ onPredict(startPc, foldedPathHist, mBTBresult[]):
 
 ---
 
-## 1.6 Input-to-Output Latency 및 Throughput
+## 1.6 Input-to-Output Latency and Throughput
 
-예측 파이프라인:
-- **s0**: startPc 수신 → SRAM read req 발송 (`s0_fire && io.enable`)
-- **s1**: SRAM read resp 수신 (1 cycle), rawTag 계산 (`RegEnable(s0_*)`)
-- **s2**: mBTB result 수신, tag match, provider 선택, prediction 출력 (`RegEnable(s1_*)`)
+Prediction Pipeline:
+- **s0**: receive startPc → send SRAM read req (`s0_fire && io.enable`)
+- **s1**: SRAM read resp reception (1 cycle), rawTag calculation (`RegEnable(s0_*)`)
+- **s2**: Receive mBTB result, tag match, select provider, output prediction (`RegEnable(s1_*)`)
 
 ```scala
 // Source: bpu/tage/Tage.scala:93-95, 111-113
@@ -241,42 +241,42 @@ private val s2_readResp = RegEnable(s1_readResp, s1_fire)
 
 ---
 
-## 1.7 Pipeline Stage 위치 (입력/출력 타이밍)
+## 1.7 Pipeline Stage Location (Input/Output Timing)
 
 | Signal | Produced @ Stage | Consumed @ Stage | Timing Note |
 |--|--|--|--|
-| `io.startPc`, `foldedPathHist` | s0 | s0 | SRAM read req 발송 |
+| `io.startPc`, `foldedPathHist` | s0 | s0 | SRAM read req sent |
 | SRAM read resp | s1 | s1 | `DataHoldBypass(tables.map(_.io.predictReadResp), RegNext(s0_fire))` |
-| `s1_rawTag` | s1 | s2 (`RegEnable(s1_fire)`) | tag 계산 후 s2에 등록 |
-| `io.fromMainBtb.result` | s2 | s2 | mBTB s2 결과가 TAGE s2에 동시 도착, position → tag XOR |
-| `io.prediction[]` | s2 | s2 (BPU top s2) | s2에서 바로 유효 |
-| `io.meta` | s2 | BPU top s3 (`RegEnable(tage.io.meta, s2_fire)`) | s3에서 FTQ에 저장 |
-| `io.toSc.providerTakenCtrVec` | s2 | SC (s2) | SC가 s2에서 TAGE counter 수신 |
+| `s1_rawTag` | s1 | s2 (`RegEnable(s1_fire)`) | After calculating tag, register it in s2 |
+| `io.fromMainBtb.result` | s2 | s2 | mBTB s2 results arrive at TAGE s2 simultaneously, position → tag XOR |
+| `io.prediction[]` | s2 | s2 (BPU top s2) | Effective immediately in s2 |
+| `io.meta` | s2 | BPU top s3 (`RegEnable(tage.io.meta, s2_fire)`) | Save to FTQ from s3 |
+| `io.toSc.providerTakenCtrVec` | s2 | SC(s2) | SC receives TAGE counter from s2 |
 
-train 경로:
+train route:
 
 | Signal | Produced @ Stage | Consumed @ Stage | Timing Note |
 |--|--|--|--|
 | `io.train` (from FTQ resolve) | t0 | t0 | resolve time branch info + BpuResolveMeta |
 | SRAM train read req | t0 | t0 | `t0_fire && !t0_useMeta && !bankConflict` |
 | train SRAM read resp | t1 | t1 | `RegEnable(t0_fire)` |
-| t2 update/alloc write | t2 | t2 (→ WriteBuffer) | `RegEnable(t1_fire)`, WriteBuffer를 통해 SRAM write |
+| t2 update/alloc write | t2 | t2 (→ WriteBuffer) | `RegEnable(t1_fire)`, SRAM write via WriteBuffer |
 
 ---
 
-## 1.8 Training 방법
+## 1.8 Training method
 
 ### Training Trigger
 - **t0_fire** = `io.stageCtrl.t0_fire && t0_hasCond && io.enable`
-- Trigger: FTQ로부터 resolve 완료 후 (`BpuTrain`) — actual taken/mispredict 결과 수신
-- **Fast-train 없음**: TAGE는 resolve (commit) 기반 train만 수행
+- Trigger: After resolution is completed from FTQ (`BpuTrain`) — actual taken/mispredict results are received
+- **No Fast-train**: TAGE only performs resolve (commit) based train
 
 ```scala
 // Source: bpu/tage/Tage.scala:189
 private val t0_fire = io.stageCtrl.t0_fire && t0_hasCond && io.enable
 ```
 
-### Meta 재사용 (`useMeta`) 최적화
+### Meta reuse (`useMeta`) optimization
 
 ```scala
 // Source: bpu/tage/Tage.scala:202-210
@@ -290,10 +290,10 @@ private val t0_useMeta = t0_branches.zipWithIndex.map { case (branch, i) =>
 private val t0_needRead = !t0_useMeta
 ```
 
-- 모든 conditional branch that hit mBTB가 provider를 사용하고 misprediction이 없으면 → **meta에서 직접 읽어 SRAM read 생략** (`t0_useMeta = true`)
-- 하나라도 mispredict 혹은 non-provider path면 → SRAM re-read 수행
+- If all conditional branches that hit mBTB use the provider and there is no misprediction → **Read directly from meta and skip SRAM read** (`t0_useMeta = true`)
+- If even one mispredict or non-provider path → Perform SRAM re-read
 
-### FTQ가 보관해야 하는 정보
+### Information that FTQ must retain
 
 ```scala
 // Source: bpu/Bundles.scala:278-286, bpu/Bpu.scala:401
@@ -308,7 +308,7 @@ class BpuResolveMeta(implicit p: Parameters) extends BpuBundle {
 s3_resolveMeta.tage := RegEnable(tage.io.meta, s2_fire)
 ```
 
-메타 구조:
+Meta structure:
 
 ```scala
 // Source: bpu/tage/Bundles.scala:117-119
@@ -319,23 +319,23 @@ class TageMeta(implicit p: Parameters) extends TageBundle {
 
 | Field | Width | Description |
 |--|--|--|
-| `entries[i].useProvider` | 1 bit | i번째 branch에 provider 사용 여부 |
-| `entries[i].providerTableIdx` | 3 bit | provider table 인덱스 |
-| `entries[i].providerWayIdx` | 2 bit | provider way 인덱스 |
-| `entries[i].providerTakenCtr` | 3 bit | 예측 시점 provider counter |
-| `entries[i].providerUsefulCtr` | 2 bit | 예측 시점 useful counter |
+| `entries[i].useProvider` | 1 bit | Whether to use provider in ith branch |
+| `entries[i].providerTableIdx` | 3bit | provider table index |
+| `entries[i].providerWayIdx` | 2bit | provider way index |
+| `entries[i].providerTakenCtr` | 3bit | Prediction point provider counter |
+| `entries[i].providerUsefulCtr` | 2bit | Prediction time useful counter |
 | `entries[i].altOrBasePred` | 1 bit | alt or base prediction |
 
-### t2 Update 및 Allocate 정책
+### t2 Update and Allocate policy
 
-- **needUpdateProvider**: hit 했고 `notNeedUpdate`가 아닌 경우 → takenCtr 업데이트
-- **needUpdateAlt**: useAlt이고 `notNeedUpdate`가 아닌 경우 → alt takenCtr 업데이트
-- **useAltOnNa 업데이트**: provider가 weak counter이고 alt가 맞으면 increment, 틀리면 decrement
-- **Allocate**: mispredict && (finalPred != actualTaken) && provider가 최고 테이블이 아닐 때
-  - 새 entry: provider보다 긴 history table 중 `!entry.valid || (takenCtr.isWeak && usefulCtr.isSaturateNegative)` 인 것 선택
-  - 선택 실패 시 `usefulResetCtr` 증가 → 포화 시 전체 usefulCtrs reset
+- **needUpdateProvider**: If hit and not `notNeedUpdate` → updated takenCtr
+- **needUpdateAlt**: if useAlt and not `notNeedUpdate` → update alt takenCtr
+- **useAltOnNa update**: If the provider is a weak counter and alt is correct, increment, if incorrect, decrement
+- **Allocate**: mispredict && (finalPred != actualTaken) && when provider is not the top table.
+- New entry: Select `!entry.valid || (takenCtr.isWeak && usefulCtr.isSaturateNegative)` from the history table longer than the provider
+- When selection fails, `usefulResetCtr` increases → When saturated, all usefulCtrs are reset.
 
-### Write Port / Conflict 처리
+### Write Port/Conflict handling
 
 ```scala
 // Source: bpu/tage/TageTable.scala:77-86
@@ -354,18 +354,18 @@ val valid = readPort.valid && !way.io.r.req.ready  // write only when SRAM read 
 
 | Trigger | Required FTQ Info | FTQ Storage | Write Port / Conflict Handling |
 |--|--|--|--|
-| `t0_fire` (resolve) | `TageMeta` (per branch: providerTableIdx, WayIdx, TakenCtr, UsefulCtr, altOrBasePred) | `BpuResolveMeta.tage` (s3 RegEnable) | WriteBuffer(size=4, 2 write ports per bank); SRAM single-port: write blocked when read active; bank conflict 시 `trainReady=false` stall |
+| `t0_fire` (resolve) | `TageMeta` (per branch: providerTableIdx, WayIdx, TakenCtr, UsefulCtr, altOrBasePred) | `BpuResolveMeta.tage` (s3 RegEnable) | WriteBuffer(size=4, 2 write ports per bank); SRAM single-port: write blocked when read active; In case of bank conflict, `trainReady=false` stall |
 
 ---
 
-## 품질 체크리스트
+## Quality Checklist
 
-- [x] 1.1~1.8 순서 준수
-- [x] memory depth/width/tables/banks/read/write ports 명시
-- [x] memory entry 코드 snippet 포함 (TageEntry, TageMetaEntry)
-- [x] field별 width/description 표 완성
-- [x] pair BTB (mBTB) 결합 규칙 명시 (position XOR tag, altOrBasePred)
-- [x] paired BTB 포함 pseudocode 작성
-- [x] latency/throughput 수치화 (2 cycle s0→s2, 1 pred-block/cycle)
-- [x] stage 입력/출력 타이밍 명시 (s0 SRAM req → s1 resp → s2 output)
-- [x] training trigger/FTQ 저장/meta fields/port conflict 처리 명시
+- [x] Comply with order 1.1~1.8
+- [x] specify memory depth/width/tables/banks/read/write ports
+- [x] Includes memory entry code snippet (TageEntry, TageMetaEntry)
+- [x] Completion of width/description table for each field
+- Specify [x] pair BTB (mBTB) combining rules (position XOR tag, altOrBasePred)
+- Write pseudocode including [x] paired BTB
+- [x] latency/throughput quantification (2 cycle s0→s2, 1 pred-block/cycle)
+- [x] Specify stage input/output timing (s0 SRAM req → s1 resp → s2 output)
+- [x] Specify training trigger/FTQ storage/meta fields/port conflict processing

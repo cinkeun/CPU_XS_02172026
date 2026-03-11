@@ -1,38 +1,38 @@
 # UTage (MicroTage) Prediction Unit Analysis
 
-> 분석 원칙: 모든 내용은 **code-based only**. utage/ 디렉토리(Parameters.scala, Abstracts.scala, Bundles.scala, Helpers.scala, MicroTageTable.scala, MicroTage.scala) 및 bpu/Bundles.scala, bpu/Bpu.scala 코드 기반.
+> Analysis principle: All content is **code-based only**. utage/ directory (Parameters.scala, Abstracts.scala, Bundles.scala, Helpers.scala, MicroTageTable.scala, MicroTage.scala) and bpu/Bundles.scala, bpu/Bpu.scala code base.
 
 ---
 
-## 1.1 Prediction Unit 종류 및 역할
+## 1.1 Prediction Unit types and roles
 
-MicroTage는 **TAGE** 계열의 conditional branch direction predictor이다.  
-`entry 당 1개의 CFI (conditional branch) 방향 + cfiPosition`을 예측한다.  
-예측 대상은 현재 입력 block의 **"다음 block"** 예측 (near-range, non-lookahead).
+MicroTage is a conditional branch direction predictor of the **TAGE** family.
+It predicts one CFI (conditional branch) direction per entry, along with `cfiPosition`.
+The prediction target is the **"next block"** prediction (near-range, non-lookahead) of the current input block.
 
-단, fast-train 전용 경로로 동작: s3 예측 결과(final prediction)를 t0에서 즉시 학습하여 다음 s0 예측에 반영한다.
-예측이 유효해지려면 `TakenCounter`가 포화 상태(`isSaturatePositive` 또는 `isSaturateNegative`)여야 한다.
+However, it operates as a fast-train only path: the s3 prediction result (final prediction) is immediately learned at t0 and reflected in the next s0 prediction.
+For the prediction to be valid, `TakenCounter` must be saturated (`isSaturatePositive` or `isSaturateNegative`).
 
-### 쉬운 예시 (uBTB/ABTB와의 결합)
+### Easy example (combination with uBTB/ABTB)
 
 ```text
-가정:
-  BPU s0 입력 PC = PC_A
-  다음 block = PC_B, 그 다음 block = PC_C
+home:
+BPU s0 input PC = PC_A
+Next block = PC_B, next block = PC_C
 
-1) uBTB/ABTB가 PC_B 내부 분기 후보를 제시
-   예: (cfiPosition=5, target=PC_C, attribute=Conditional)
+1) uBTB/ABTB presents PC_B internal branch candidates
+Example: (cfiPosition=5, target=PC_C, attribute=Conditional)
 
-2) MicroTage는 target은 예측하지 않고 방향만 예측
-   예: (cfiPosition=5, taken=false)
+2) MicroTage does not predict the target, but only the direction.
+Example: (cfiPosition=5, taken=false)
 
-3) BPU top이 cfiPosition 매칭 후 방향 override
-   - base(BTB) taken=true, uTAGE taken=false 이면 not-taken으로 뒤집힘
-   - 결과: next PC는 PC_C가 아니라 fall-through 쪽으로 선택됨
+3) BPU top overrides direction after matching cfiPosition
+- If base(BTB) taken=true, uTAGE taken=false, it is overturned to not-taken.
+- Result: The next PC is selected for fall-through, not PC_C.
 ```
 
-즉, MicroTage는 "어디로 갈지(target)"가 아니라
-"BTB가 잡아온 conditional branch를 탈지 말지(direction)"를 보정한다.
+In other words, MicroTage is not a “target”;
+Corrects the “direction of whether to take the conditional branch captured by BTB”.
 
 ```scala
 // Source: bpu/utage/MicroTage.scala:97-101
@@ -42,15 +42,15 @@ prediction.bits.taken       := finalPredTaken && choseTableTakenCtr.isSaturatePo
 prediction.bits.cfiPosition := finalPredCfiPosition
 ```
 
-| Unit     | Type | CFI per Entry | Predict Distance | 설명                                                  |
+| Unit | Type | CFI per Entry | Predict Distance | Description |
 |----------|------|---------------|------------------|-------------------------------------------------------|
-| MicroTage | TAGE | 1 (conditional branch) | Next block     | path history 기반 direction + cfiPosition 예측, 포화 counter 활성화 시에만 유효 |
+| MicroTage | TAGE | 1 (conditional branch) | Next block | Path history based direction + cfiPosition prediction, valid only when saturation counter is activated |
 
 ---
 
 ## 1.2 Prediction Unit Memory Spec
 
-파라미터 설정 (`Parameters.scala:25-33`):
+Parameter settings (`Parameters.scala:25-33`):
 
 ```scala
 // Source: bpu/utage/Parameters.scala:25-39
@@ -63,23 +63,23 @@ NumTables:     Int = 2,
 UsefulWidth:   Int = 2,
 ```
 
-`MicroTageInfo(NumSets, HistoryLength, TagWidth, HistBitsInTag)` 기준:
+Based on `MicroTageInfo(NumSets, HistoryLength, TagWidth, HistBitsInTag)`:
 
-- **entries** 배열: `RegInit(VecInit(Seq.fill(numSets)(...)))` → 동기 레지스터 (FF-based, not SRAM)
-- **usefulEntries** 배열: 별도 분리 저장
+- **entries** array: `RegInit(VecInit(Seq.fill(numSets)(...)))` → synchronous register (FF-based, not SRAM)
+- **usefulEntries** array: stored separately
 
-### History Length 명시
+### Specify History Length
 
-`TableInfos`의 두 번째 인자가 `HistoryLength`다.
+The second argument of `TableInfos` is `HistoryLength`.
 
 | Table | NumSets | HistoryLength | TagWidth | HistBitsInTag |
 |-------|---------|---------------|----------|---------------|
 | Table-0 | 512 | **9**  | 9  | 15 |
 | Table-1 | 512 | **16** | 12 | 16 |
 
-- MicroTage의 현재 설정 history 길이: **9 / 16**
-- 최대 history 길이(현재 활성 table 기준): **16**
-- `HistBitsInTag`는 tag 생성 시 반영되는 history bit 수로, `HistoryLength`와 다른 의미다.
+- MicroTage's current settings history length: **9 / 16**
+- Maximum history length (based on currently active table): **16**
+- `HistBitsInTag` is the number of history bits reflected when creating a tag, and has a different meaning from `HistoryLength`.
 
 ```scala
 // Source: bpu/utage/MicroTageTable.scala:76-77
@@ -87,7 +87,7 @@ private val entries       = RegInit(VecInit(Seq.fill(numSets)(0.U.asTypeOf(new M
 private val usefulEntries = RegInit(VecInit(Seq.fill(numSets)(UsefulCounter.Zero)))
 ```
 
-각 Table의 entry 구성:  
+Entry configuration for each table:
 `valid(1) + tag(TagWidth) + takenCtr(3) + cfiPosition(CfiPositionWidth)` + separate `useful(2)`
 
 | Memory/Table | Depth | Width (bit) [entry only] | #Tables | Banks | Read Ports | Write Ports |
@@ -97,11 +97,11 @@ private val usefulEntries = RegInit(VecInit(Seq.fill(numSets)(UsefulCounter.Zero
 | Table-1 (entries) | 512 | 1 + 12 + 3 + CfiPositionWidth | 1 | 1 | 1 | 1 |
 | Table-1 (useful)  | 512 | 2 | 1 | 1 | 1 | 1 |
 
-> `CfiPositionWidth`는 bpu 공통 파라미터(`HasBpuParameters`)로 정의됨.
+> `CfiPositionWidth` is defined as a bpu common parameter (`HasBpuParameters`).
 
 ---
 
-## 1.3 Prediction Unit Memory Entry 설명
+## 1.3 Prediction Unit Memory Entry Description
 
 ### MicroTageEntry (per-table main entry)
 
@@ -112,18 +112,18 @@ class MicroTageEntry() extends MicroTageBundle {
   val tag:         UInt            = UInt(tagLen.W)
   val takenCtr:    SaturateCounter = TakenCounter()  // width = TakenCtrWidth = 3
   val cfiPosition: UInt            = UInt(CfiPositionWidth.W)
-  // val useful: SaturateCounter = UsefulCounter()  // 분리 저장
+// val useful: SaturateCounter = UsefulCounter() // Store separately
 }
 ```
 
 | Field Name   | Width (bit)         | Description                                              |
 |--------------|---------------------|----------------------------------------------------------|
-| `valid`      | 1                   | 엔트리 유효 여부                                         |
-| `tag`        | tagLen (9 or 12)    | PC hash + history hash 기반 태그                         |
-| `takenCtr`   | 3 (`TakenCtrWidth`) | Saturating counter: taken 방향 예측                      |
-| `cfiPosition`| CfiPositionWidth    | 예측 branch의 block 내 위치                              |
+| `valid` | 1 | Entry validity |
+| `tag` | tagLen (9 or 12) | PC hash + history hash based tags |
+| `takenCtr` | 3 (`TakenCtrWidth`) | Saturating counter: predicting direction taken |
+| `cfiPosition`| CfiPositionWidth | Location of predicted branch in block |
 
-### usefulEntries (별도 배열)
+### usefulEntries (separate array)
 
 ```scala
 // Source: bpu/utage/MicroTageTable.scala:77
@@ -132,13 +132,13 @@ private val usefulEntries = RegInit(VecInit(Seq.fill(numSets)(UsefulCounter.Zero
 
 | Field Name | Width (bit)           | Description                           |
 |------------|-----------------------|---------------------------------------|
-| `useful`   | 2 (`UsefulWidth`)     | 엔트리 유용성 카운터 (allocation 정책에 사용) |
+| `useful` | 2 (`UsefulWidth`) | Entry usefulness counter (used in allocation policy) |
 
 ---
 
-## 1.4 Pair BTB Unit 설명
+## 1.4 Pair BTB Unit Description
 
-MicroTage는 **aBTB (AheadBTB)** 와 paired 동작한다.
+MicroTage works paired with **aBTB (AheadBTB)**.
 
 ```scala
 // Source: bpu/utage/MicroTage.scala:42-43
@@ -148,9 +148,9 @@ val abtbPrediction: Vec[Valid[Prediction]] = Input(Vec(NumAheadBtbPredictionEntr
 utage.io.abtbPrediction := abtb.io.prediction
 ```
 
-MicroTage는 aBTB의 conditional taken branch 예측을 base(fallback)로 수신하여:
-- s1 단계에서 aBTB의 첫 번째 taken conditional branch (`s1_abtbFirstTakenBranch`)를 메타에 기록.
-- training 시 `t0_baseTaken`, `t0_baseCfiPosition`으로 참조해 `useful` 카운터 업데이트 방향을 결정.
+MicroTage receives aBTB's conditional taken branch prediction as a base (fallback):
+- In step s1, the first taken conditional branch (`s1_abtbFirstTakenBranch`) of aBTB is recorded in the meta.
+- During training, refer to `t0_baseTaken` and `t0_baseCfiPosition` to determine the `useful` counter update direction.
 
 ```scala
 // Source: bpu/utage/MicroTage.scala:111-121
@@ -167,13 +167,13 @@ s1_meta.bits.baseTaken       := s1_abtbCondTaken
 s1_meta.bits.baseCfiPosition := s1_abtbFirstTakenBranch.bits.cfiPosition
 ```
 
-| Prediction Unit | Paired BTB | Pairing Purpose | 결합 Stage / Signal |
+| Prediction Unit | Paired BTB | Pairing Purpose | Combined Stage / Signal |
 |-----------------|------------|-----------------|---------------------|
-| MicroTage       | aBTB       | direction+position fallback (base)로 useful counter 업데이트 방향 판단 | s1 stage: `s1_abtbCondTaken`, `s1_abtbFirstTakenBranch` → `s1_meta.baseTaken / baseCfiPosition` |
+| MicroTage | aBTB | Determine useful counter update direction with direction+position fallback (base) | s1 stage: `s1_abtbCondTaken`, `s1_abtbFirstTakenBranch` → `s1_meta.baseTaken / baseCfiPosition` |
 
 ---
 
-## 1.5 다음 예측 Pseudocode (paired BTB 포함)
+## 1.5 Next Prediction Pseudocode (with paired BTB)
 
 ```text
 onPredict(startPc, foldedPathHist, abtbPrediction[]):
@@ -213,11 +213,11 @@ onPredict(startPc, foldedPathHist, abtbPrediction[]):
 
 ---
 
-## 1.6 Input-to-Output Latency 및 Throughput
+## 1.6 Input-to-Output Latency and Throughput
 
-MicroTage의 예측 경로:
-- **s0**: `computeHash` 및 `entries` 레지스터 읽기 → `io.resp` 유효 (combinational)
-- **s0→s1**: `RegEnable(prediction, io.stageCtrl.s0_fire)` → s1에서 `io.prediction` 유효
+MicroTage’s predictive path:
+- **s0**: Read registers `computeHash` and `entries` → `io.resp` valid (combinational)
+- **s0→s1**: `RegEnable(prediction, io.stageCtrl.s0_fire)` → `io.prediction` is valid in s1
 
 ```scala
 // Source: bpu/utage/MicroTage.scala:119, 123
@@ -232,19 +232,19 @@ io.meta       := s1_meta
 
 ---
 
-## 1.7 Pipeline Stage 위치 (입력/출력 타이밍)
+## 1.7 Pipeline Stage Location (Input/Output Timing)
 
 | Signal                        | Produced @ Stage | Consumed @ Stage | Timing Note                                                     |
 |-------------------------------|------------------|------------------|-----------------------------------------------------------------|
-| `io.startPc`, `foldedPathHist` | s0               | s0 (combinational) | 즉시 hash 계산, table read                                     |
-| `entries[idx]` (read)         | s0 (async read)  | s0               | `RegInit` 배열: FF → read는 combinational                      |
+| `io.startPc`, `foldedPathHist` | s0 | s0 (combinational) | Immediate hash calculation, table read |
+| `entries[idx]` (read) | s0 (async read) | s0 | `RegInit` array: FF → read is combinational |
 | `io.resp.valid/taken/cfiPos`  | s0               | s0               | combinational hit check                                         |
-| `prediction` Wire             | s0               | s0→s1            | `RegEnable(..., s0_fire)`로 s1에 등록                           |
+| `prediction` Wire | s0 | s0→s1 | Registered in s1 as `RegEnable(..., s0_fire)` |
 | `io.prediction`               | s1               | BPU top (s1)     | s1 valid signal                                                 |
-| `abtbPrediction` (input)      | s1               | s1               | aBTB s0 결과가 s1에 도달; `s1_meta.base*` 에 저장              |
-| `s1_meta` / `io.meta`         | s1               | BpuFastTrain (t0) | `s1_meta = RegEnable(predMeta, s0_fire)`; Bpu top이 s1→s2→s3 파이프 후 t0에 전달 |
+| `abtbPrediction` (input) | s1 | s1 | aBTB s0 result reaches s1; Save to `s1_meta.base*` |
+| `s1_meta` / `io.meta` | s1 | BpuFastTrain(t0) | `s1_meta = RegEnable(predMeta, s0_fire)`; BPU top pipes s1→s2→s3 and then passes to t0 |
 
-train 경로에서의 meta 전달:
+Passing meta on the train route:
 
 ```scala
 // Source: bpu/Bpu.scala:155-157, 187, 316
@@ -259,10 +259,10 @@ s1_utageMeta := utage.io.meta.bits
 
 ---
 
-## 1.8 Training 방법
+## 1.8 Training method
 
-### Training 특성
-MicroTage는 **fast-train 전용** predictor이다. resolve(commit-time) train은 없다.
+### Training Traits
+MicroTage is a **fast-train only** predictor. There is no resolve(commit-time) train.
 
 ```scala
 // Source: bpu/utage/Parameters.scala:59
@@ -272,7 +272,7 @@ def EnableFastTrain: Boolean = true
 
 ### Training Trigger
 - **t0_fire** = `io.fastTrain.get.valid && io.enable`
-- Trigger 조건: s3 예측 결과가 s1 예측과 다를 때 (`hasOverride`) 또는 s3 예측이 확정된 시점에 즉시 학습
+- Trigger condition: Immediate learning when the s3 prediction result is different from the s1 prediction (`hasOverride`) or when the s3 prediction is confirmed
 
 ```scala
 // Source: bpu/utage/MicroTage.scala:127-158
@@ -297,10 +297,10 @@ private val t0_histTableNeedAlloc  = t0_misPred && t0_fire
 private val t0_histTableNeedUpdate = t0_predHit && t0_fire
 ```
 
-### FTQ가 보관하는 정보
+### Information stored by FTQ
 
-MicroTage의 meta는 FTQ가 직접 저장하지 않고, Bpu top이 **s1→s2→s3 레지스터 체인**으로 보관 후 `BpuFastTrain`으로 t0에 전달한다.  
-(BpuFastTrain은 FTQ를 거치지 않는 BPU 내부 경로)
+MicroTage's meta is not stored directly by FTQ, but Bpu top stores it in **s1→s2→s3 register chain** and then transfers it to t0 with `BpuFastTrain`.
+(BpuFastTrain is a BPU internal route that does not go through FTQ)
 
 ```scala
 // Source: bpu/Bundles.scala:252-258
@@ -335,14 +335,14 @@ class MicroTageMeta(implicit p: Parameters) extends MicroTageBundle {
 
 | Field                      | Width                              | Description                              |
 |----------------------------|------------------------------------|------------------------------------------|
-| `histTableHitMap`          | NumTables × 1 = 2 bit              | 각 table hit 여부                         |
-| `histTableTakenMap`        | NumTables × 1 = 2 bit              | 각 table의 taken 예측값                   |
-| `histTableUsefulVec`       | NumTables × UsefulWidth = 4 bit    | 예측 시점의 useful 값 스냅샷              |
-| `histTableCfiPositionVec`  | NumTables × CfiPositionWidth       | 각 table의 cfiPosition 예측값             |
-| `baseTaken`                | 1 bit                              | aBTB의 conditional taken 여부 (base)     |
-| `baseCfiPosition`          | CfiPositionWidth                   | aBTB의 첫번째 taken branch 위치 (base)   |
+| `histTableHitMap` | NumTables × 1 = 2 bits | Whether each table hits |
+| `histTableTakenMap` | NumTables × 1 = 2 bits | Taken forecast values ​​of each table |
+| `histTableUsefulVec` | NumTables × UsefulWidth = 4 bits | Snapshot of useful values ​​at prediction time |
+| `histTableCfiPositionVec` | NumTables × CfiPositionWidth | cfiPosition predicted value of each table |
+| `baseTaken` | 1 bit | Whether aBTB is conditionally taken (base) |
+| `baseCfiPosition` | CfiPositionWidth | aBTB's first taken branch location (base) |
 
-### Allocation 정책
+### Allocation Policy
 
 ```scala
 // Source: bpu/utage/MicroTage.scala:168-176
@@ -357,13 +357,13 @@ private val normalAllocMask      = PriorityEncoderOH(allocCandidateMask)
 private val t0_allocMask         = Mux(t0_fastAllocMask.orR, t0_fastAllocMask, normalAllocMask)
 ```
 
-1. **FastAlloc**: provider table 자신이 useful=0이면 즉시 재활용(provider 교체)
-2. **NormalAlloc**: provider보다 높은 인덱스 table 중 useful MSB=0인 후보에서 PriorityEncoder로 선택
+1. **FastAlloc**: If the provider table itself is useful=0, immediately recycle (replace provider)
+2. **NormalAlloc**: Select as PriorityEncoder a candidate with useful MSB=0 among the index tables higher than the provider.
 
-### Useful Counter 주기적 Reset
+### Useful Counter Periodic Reset
 
-Table-0: `lowTickCounter` (9+1 bit) 오버플로우 시 → `usefulEntries.selfDecrease()` (감소)  
-Table-1: `highTickCounter` (11+1 bit) 오버플로우 시 → `usefulEntries.value >>= 1` (우측 시프트)
+Table-0: `lowTickCounter` (9+1 bit) When overflow → `usefulEntries.selfDecrease()` (decrease)
+Table-1: `highTickCounter` (11+1 bit) overflow → `usefulEntries.value >>= 1` (right shift)
 
 ```scala
 // Source: bpu/utage/MicroTage.scala:62-63, 70-73
@@ -374,26 +374,26 @@ case 0 => t.usefulReset := lowTickCounter(LowTickWidth)
 case 1 => t.usefulReset := highTickCounter(HighTickWidth)
 ```
 
-### Write Port / Conflict 처리
+### Write Port/Conflict handling
 
-- `entries`: update/alloc 경쟁 없음 (per-cycle 1 write, `when(io.update.valid && ...)`)
-- `usefulEntries`: update와 usefulReset이 동시 발생 가능하나, `when(io.usefulReset)` 블록이 분리 처리 (Chisel last-connect 시맨틱 → io.usefulReset 우선)
-- t0 fast-train은 단일 cycle에 최대 1개 table에 alloc 또는 update → port 충돌 없음
+- `entries`: No update/alloc contention (per-cycle 1 write, `when(io.update.valid && ...)`)
+- `usefulEntries`: update and usefulReset can occur simultaneously, but `when(io.usefulReset)` blocks are processed separately (Chisel last-connect semantics → io.usefulReset takes priority)
+- t0 fast-train alloc or update up to 1 table in a single cycle → no port conflict
 
 | Trigger         | Required FTQ Info              | FTQ Storage / BPU Internal         | Write Port / Conflict Handling                    |
 |-----------------|--------------------------------|------------------------------------|---------------------------------------------------|
-| `t0_fire` (fast-train) | `MicroTageMeta` (s1 capture) | BPU내 s1→s2→s3 RegEnable chain + `BpuFastTrain` | 1 write port per table, 충돌 없음; useful reset은 별도 분기 처리 |
+| `t0_fire` (fast-train) | `MicroTageMeta` (s1 capture) | In BPU s1→s2→s3 RegEnable chain + `BpuFastTrain` | 1 write port per table, no conflicts; useful reset handles separate branches |
 
 ---
 
-## 품질 체크리스트
+## Quality Checklist
 
-- [x] 1.1~1.8 순서 준수
-- [x] memory depth/width/tables/banks/read/write ports 명시
-- [x] memory entry 코드 snippet 포함
-- [x] field별 width/description 표 완성
-- [x] pair BTB (aBTB) 결합 규칙 명시
-- [x] paired BTB 포함 pseudocode 작성
-- [x] latency/throughput 수치화 (1 cycle, 1 pred/cycle)
-- [x] stage 입력/출력 타이밍 명시 (s0 input → s1 output)
-- [x] training trigger/FTQ 저장/meta fields/port conflict 처리 명시
+- [x] Comply with order 1.1~1.8
+- [x] specify memory depth/width/tables/banks/read/write ports
+- [x] Includes memory entry code snippet
+- [x] Completion of width/description table for each field
+- [x] specify pair BTB (aBTB) combining rules
+- Write pseudocode including [x] paired BTB
+- [x] latency/throughput quantification (1 cycle, 1 pred/cycle)
+- [x] Specify stage input/output timing (s0 input → s1 output)
+- [x] Specify training trigger/FTQ storage/meta fields/port conflict processing

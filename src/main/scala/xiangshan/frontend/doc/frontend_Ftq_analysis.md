@@ -14,21 +14,21 @@
 
 ## 1. Module Summary
 
-- **역할**: BPU 예측 결과를 버퍼링하고 IFU / ICache / Prefetch에 fetch 요청을 순서대로 공급하며, IFU predecode 결과와 Backend commit/redirect를 수신해 BPU를 업데이트/복원하는 중앙 큐이다.
-- **위치**: `Frontend.scala` → `Module(new Ftq)` (FrontendInlinedImp 내부)
-- **Pipeline stage 수**: 레지스터 스테이지 없음 (포인터 기반 circular queue) — 단, BPU enqueue와 IFU 전송 사이에 1~2 사이클 SRAM latency 존재
+- **Role**: A central queue that buffers BPU prediction results, supplies fetch requests to IFU / ICache / Prefetch in order, and updates/restores BPU by receiving IFU predecode results and Backend commit/redirect.
+- **Position**: `Frontend.scala` → `Module(new Ftq)` (inside FrontendInlinedImp)
+- **Number of pipeline stages**: No register stages (pointer-based circular queue) — However, 1 to 2 cycle SRAM latency exists between BPU enqueue and IFU transmission.
 
 ---
 
 ## 2. Key Parameters
 
-| Parameter          | Source                              | Default | 영향                                      |
+| Parameter | Source | Default | Impact |
 | ------------------ | ----------------------------------- | ------- | ----------------------------------------- |
-| FtqSize            | `p(XSCoreParamsKey).FtqSize`        | 64      | 최대 in-flight fetch 블록 수 (circular)   |
-| PredictWidth       | `HasXSParameter.PredictWidth`       | 16      | commitStateQueue 엔트리당 슬롯 수          |
-| copyNum            | `Ftq.copyNum`                       | 5       | 포인터 복제본 수 (fanout 감소)             |
-| FtqRedirectAheadNum| `HasXSParameter`                    | ~4      | BjuCnt 기반 redirect ahead 포트 수        |
-| IfuRedirectNum     | `HasXSParameter`                    | 1       | IFU redirect SRAM 읽기 포트 수            |
+| FtqSize | `p(XSCoreParamsKey).FtqSize` | 64 | Maximum number of in-flight fetch blocks (circular) |
+| PredictWidth | `HasXSParameter.PredictWidth` | 16 | number of slots per commitStateQueue entry |
+| copyNum | `Ftq.copyNum` | 5 | Number of pointer replicas (reduces fanout) |
+| FtqRedirectAheadNum| `HasXSParameter` | ~4 | BjuCnt based redirect ahead port number |
+| IfuRedirectNum | `HasXSParameter` | 1 | IFU redirect SRAM read port number |
 
 ---
 
@@ -36,80 +36,80 @@
 
 | Port                    | Dir   | Bitwidth          | Protocol  | Description                              |
 | ----------------------- | ----- | ----------------- | --------- | ---------------------------------------- |
-| `io.fromBpu.resp`       | in    | BpuToFtqBundle    | Decoupled | BPU 예측 결과 (s1/s2/s3 포함)            |
+| `io.fromBpu.resp` | in | BpuToFtqBundle | Decoupled | BPU prediction results (including s1/s2/s3) |
 | `io.toBpu.redirect`     | out   | BranchPredictionRedirect | Valid | misprediction → BPU redirect          |
-| `io.toBpu.update`       | out   | BranchPredictionUpdate   | Valid | commit 정보 → BPU 학습                 |
-| `io.toBpu.enq_ptr`      | out   | FtqPtr            | —         | 현재 bpuPtr 전달                         |
-| `io.toBpu.redirctFromIFU`| out  | Bool              | —         | IFU redirect 여부                        |
+| `io.toBpu.update` | out | BranchPredictionUpdate | Valid | commit information → BPU learning |
+| `io.toBpu.enq_ptr` | out | FtqPtr | — | Pass current bpuPtr |
+| `io.toBpu.redirctFromIFU`| out | Bool | — | IFU redirect or not |
 | `io.fromIfu.pdWb`       | in    | PredecodeWritebackBundle | Valid | IFU predecode writeback               |
-| `io.toIfu.req`          | out   | FetchRequestBundle | Decoupled | IFU로 fetch 요청                        |
+| `io.toIfu.req` | out | FetchRequestBundle | Decoupled | fetch request with IFU |
 | `io.toIfu.redirect`     | out   | BranchPredictionRedirect | Valid | IFU flush                             |
-| `io.toIfu.flushFromBpu` | out   | BpuFlushInfo      | —         | BPU S2/S3 override flush 정보            |
-| `io.toICache.req`       | out   | FtqToICacheRequestBundle | Decoupled | ICache fetch 요청 (5 copies)        |
-| `io.toPrefetch.req`     | out   | FtqICacheInfo     | Decoupled | Prefetch 요청                            |
-| `io.fromBackend`        | in    | CtrlToFtqIO       | —         | redirect, rob_commits, ftqIdxAhead 등    |
-| `io.toBackend`          | out   | FtqToCtrlIO       | —         | pc_mem write, newest_entry 정보          |
-| `io.mmioCommitRead`     | in/out| mmioCommitRead    | —         | IFU MMIO commit 확인                     |
-| `io.icacheFlush`        | out   | Bool              | —         | ICache 파이프 flush                      |
-| `io.bpuInfo`            | out   | Bundle            | —         | BPU 적중/오예측 카운터                    |
+| `io.toIfu.flushFromBpu` | out | BpuFlushInfo | — | BPU S2/S3 override flush information |
+| `io.toICache.req` | out | FtqToICacheRequestBundle | Decoupled | ICache fetch request (5 copies) |
+| `io.toPrefetch.req` | out | FtqICacheInfo | Decoupled | Prefetch request |
+| `io.fromBackend` | in | CtrlToFtqIO | — | redirect, rob_commits, ftqIdxAhead, etc. |
+| `io.toBackend` | out | FtqToCtrlIO | — | pc_mem write, newest_entry info |
+| `io.mmioCommitRead` | in/out| mmioCommitRead | — | IFU MMIO commit confirmation |
+| `io.icacheFlush` | out | Bool | — | ICache pipe flush |
+| `io.bpuInfo` | out | Bundle | — | BPU hit/misprediction counter |
 
 ---
 
 ## 4. Internal Pipeline / State
 
-### 4.1 포인터 구조 (모두 `RegInit(FtqPtr(false.B, 0.U))`)
+### 4.1 Pointer structure (all `RegInit(FtqPtr(false.B, 0.U))`)
 
-| 포인터 | 역할 | 증가 조건 |
+| pointer | role | Increase conditions |
 | ------- | ---- | --------- |
-| `bpuPtr` | BPU 새 엔트리 enqueue 위치 | `enq_fire` (BPU s1 응답 fire) |
-| `ifuPtr` | IFU로 전송할 다음 엔트리 | `toIfu.req.fire && allowToIfu` |
-| `ifuPtrPlus1/2` | ifuPtr+1/+2 미리 계산 | 동일 |
-| `pfPtr` | Prefetch 전송 포인터 | `toPrefetch.req.fire` |
-| `ifuWbPtr` | IFU predecode writeback 확인 포인터 | `ifu_wb_valid` |
-| `commPtr` | commit 완료 포인터 | `canCommit` |
-| `commPtrPlus1` | commPtr+1 미리 계산 | 동일 |
-| `robCommPtr` | ROB commit 동기 포인터 | ROB commit |
+| `bpuPtr` | BPU new entry enqueue location | `enq_fire` (BPU s1 response fire) |
+| `ifuPtr` | Next entry to transfer to IFU | `toIfu.req.fire && allowToIfu` |
+| `ifuPtrPlus1/2` | precompute ifuPtr+1/+2 | Same |
+| `pfPtr` | Prefetch transfer pointer | `toPrefetch.req.fire` |
+| `ifuWbPtr` | IFU predecode writeback confirmation pointer | `ifu_wb_valid` |
+| `commPtr` | commit completion pointer | `canCommit` |
+| `commPtrPlus1` | commPtr+1 precompute | Same |
+| `robCommPtr` | ROB commit synchronous pointer | ROB commit |
 
-포인터 불변식: `commPtr ≤ ifuWbPtr ≤ ifuPtr ≤ bpuPtr`
+Pointer invariant: `commPtr ≤ ifuWbPtr ≤ ifuPtr ≤ bpuPtr`
 
-### 4.2 내부 SRAM / 레지스터 구조
+### 4.2 Internal SRAM/Register Structure
 
-| 이름 | 타입 | 크기 | 역할 |
+| name | Type | size | role |
 | ---- | ---- | ---- | ---- |
-| `ftq_pc_mem` (FtqPcMemWrapper) | SyncDataModuleTemplate | FtqSize × Ftq_RF_Components | PC/nextLine 저장, 다수 read 포트 |
-| `ftq_redirect_mem` | SyncDataModuleTemplate | FtqSize × Ftq_Redirect_SRAMEntry | 분기 이력/RAS 상태 (redirect 복원용) |
-| `ftq_meta_mem` | SyncDataModuleTemplate | FtqSize × MetaEntry | BPU 메타데이터 + FTBEntry (학습용) |
-| `ftq_pd_mem` | SyncDataModuleTemplate | FtqSize × Ftq_pd_Entry | IFU predecode 결과 (brMask, jmpInfo) |
-| `ftb_entry_mem` | SyncDataModuleTemplate | FtqSize × FTBEntry_FtqMem | FTB entry (redirect 검증용) |
-| `update_target` | Reg Vec | FtqSize × VAddrBits | 예측 target 주소 |
-| `cfiIndex_vec` | Reg Vec | FtqSize × ValidUInt | CFI 위치 인덱스 |
-| `mispredict_vec` | Reg Vec | FtqSize × Vec(PW, Bool) | 각 슬롯 misprediction 여부 |
-| `pred_stage` | Reg Vec | FtqSize × 2 | 예측 stage (S1/S2/S3) |
-| `commitStateQueueReg` | RegInit Vec | FtqSize × Vec(PW, 2bit) | 명령어별 commit 상태 (empty/toCommit/committed/flushed) |
+| `ftq_pc_mem` (FtqPcMemWrapper) | SyncDataModuleTemplate | FtqSize × Ftq_RF_Components | PC/nextLine storage, multiple read ports |
+| `ftq_redirect_mem` | SyncDataModuleTemplate | FtqSize × Ftq_Redirect_SRAMEntry | Branch History/RAS Status (for redirect restore) |
+| `ftq_meta_mem` | SyncDataModuleTemplate | FtqSize × MetaEntry | BPU metadata + FTBEntry (for training) |
+| `ftq_pd_mem` | SyncDataModuleTemplate | FtqSize × Ftq_pd_Entry | IFU predecode result (brMask, jmpInfo) |
+| `ftb_entry_mem` | SyncDataModuleTemplate | FtqSize × FTBEntry_FtqMem | FTB entry (for redirect verification) |
+| `update_target` | Reg Vec | FtqSize × VAddrBits | Predicted target address |
+| `cfiIndex_vec` | Reg Vec | FtqSize × ValidUInt | CFI Position Index |
+| `mispredict_vec` | Reg Vec | FtqSize × Vec(PW, Bool) | Whether each slot has misprediction |
+| `pred_stage` | Reg Vec | FtqSize × 2 | prediction stage (S1/S2/S3) |
+| `commitStateQueueReg` | RegInit Vec | FtqSize × Vec(PW, 2bit) | Commit status by command (empty/toCommit/committed/flushed) |
 | `entry_fetch_status` | RegInit Vec | FtqSize × 1bit | f_to_send / f_sent |
 | `entry_hit_status` | RegInit Vec | FtqSize × 2bit | h_not_hit / h_false_hit / h_hit |
 
-### 4.3 복제 구조 (fanout 감소)
+### 4.3 Replication structure (reduce fanout)
 
-- `copied_ifu_ptr[5]`, `copied_bpu_ptr[5]`: ifuPtr/bpuPtr 복제 5벌
-- `copied_bpu_in_bypass_buf[5]`, `copied_bpu_in_bypass_ptr[5]`: bypass 데이터 복제
-- `copyNum=5`로 ICache 5개 read port에 각각 독립 신호 연결
+- `copied_ifu_ptr[5]`, `copied_bpu_ptr[5]`: 5 copies of ifuPtr/bpuPtr
+- `copied_bpu_in_bypass_buf[5]`, `copied_bpu_in_bypass_ptr[5]`: bypass data replication
+- Connect independent signals to each of the five ICache read ports with `copyNum=5`
 
 ### 4.4 BPU enqueue 1-cycle delay
 
 ```
-// critical path 완화: BPU enqueue 1사이클 후 레지스터 갱신
+// Critical path mitigation: Register update after 1 cycle of BPU enqueue
 last_cycle_bpu_in       = RegNext(bpu_in_fire)
 last_cycle_bpu_in_ptr   = RegEnable(bpu_in_resp_ptr, bpu_in_fire)
 last_cycle_bpu_target   = RegEnable(bpu_in_resp.getTarget(3), bpu_in_fire)
 last_cycle_cfiIndex     = RegEnable(bpu_in_resp.cfiIndex(3), bpu_in_fire)
-// 다음 사이클에 entry_fetch_status, cfiIndex_vec, update_target 갱신
+// Update entry_fetch_status, cfiIndex_vec, and update_target in the next cycle
 ```
 
-### 4.5 bypass 경로 (BPU enqueue → IFU 전송 0-cycle)
+### 4.5 bypass route (BPU enqueue → IFU transmission 0-cycle)
 
 ```
-// BPU가 방금 enqueue한 엔트리가 ifuPtr와 일치할 때 SRAM bypass
+// SRAM bypass when the entry just enqueued by BPU matches ifuPtr
 when(last_cycle_bpu_in && bpu_in_bypass_ptr === ifuPtr):
   toIfuPcBundle    := bpu_in_bypass_buf_for_ifu
   entry_is_to_send := true.B
@@ -124,41 +124,41 @@ when(last_cycle_bpu_in && bpu_in_bypass_ptr === ifuPtr):
 
 1. `io.fromBpu.resp.fire && allowBpuIn` → `enq_fire` → `bpuPtr += 1`
 2. `bpu_in_resp = selectedResp` (S3 redirect > S2 redirect > S1)
-3. SRAM write (1 cycle 후): `ftq_pc_mem`, `ftq_redirect_mem` (lastStage), `ftq_meta_mem` (lastStage)
-4. S2/S3 redirect 시 `bpuPtr` 되감기: `bpuPtr := bpu_s2_resp.ftq_idx + 1`
+3. SRAM write (after 1 cycle): `ftq_pc_mem`, `ftq_redirect_mem` (lastStage), `ftq_meta_mem` (lastStage)
+4. Rewind `bpuPtr` when S2/S3 redirect: `bpuPtr := bpu_s2_resp.ftq_idx + 1`
 
-### 5.2 IFU / ICache 전송 (FTQ → IFU/ICache)
+### 5.2 IFU/ICache transfer (FTQ → IFU/ICache)
 
 1. `entry_is_to_send = (entry_fetch_status(ifuPtr) === f_to_send) || bypass`
 2. `io.toIfu.req.valid = entry_is_to_send && ifuPtr ≠ bpuPtr`
 3. `io.toIfu.req.fire && allowToIfu` → `ifuPtr += 1`, `entry_fetch_status := f_sent`
-4. ICache에는 5 copies 동시 전송 (toICachePcBundle/toICacheEntryToSend)
+4. Simultaneous transmission of 5 copies to ICache (toICachePcBundle/toICacheEntryToSend)
 5. `allowToIfu = !ifuFlush && !backendRedirect && !backendRedirectReg`
 
 ### 5.3 IFU predecode writeback (fromIfu → FTQ)
 
 1. `ifu_wb_valid = pdWb.valid` → `ftq_pd_mem` write
-2. `commitStateQueueNext`: `inRange && valid` 슬롯을 `c_empty → c_toCommit`
+2. `commitStateQueueNext`: `inRange && valid` slot `c_empty → c_toCommit`
 3. `ifuWbPtr += 1`
-4. FTB hit인데 mispred 감지 → `has_false_hit` → false_hit 처리, `hit_pd_mispred` 기록
-5. IFU redirect 발생 시 → `toBpu.redirect.valid` (IFU 수정 정보 전달)
+4. FTB hit, mispred detected → `has_false_hit` → false_hit processed, `hit_pd_mispred` recorded
+5. When IFU redirect occurs → `toBpu.redirect.valid` (Send IFU modification information)
 
-### 5.4 Commit 처리 (fromBackend → FTQ)
+### 5.4 Commit processing (fromBackend → FTQ)
 
-1. `canCommit`: commPtr 엔트리의 모든 `c_toCommit` 슬롯이 committed 또는 비었을 때
-2. commit 시 ROB의 실제 결과로 `mispredict_vec` 갱신
-3. `FTBEntryGen`: predecode + commit 정보로 새 FTB entry 생성
-4. `toBpu.update.valid` → BPU 학습 데이터 전달 (pc, ftb_entry, br_taken_mask, mispred_mask 등)
+1. `canCommit`: When all `c_toCommit` slots in the commPtr entry are committed or empty.
+2. Update `mispredict_vec` with the actual result of ROB when committing
+3. `FTBEntryGen`: Create a new FTB entry with predecode + commit information
+4. `toBpu.update.valid` → BPU training data transfer (pc, ftb_entry, br_taken_mask, mispred_mask, etc.)
 5. `commPtr += 1`
 
 ### 5.5 Backend redirect (fromBackend → FTQ)
 
 1. `backendRedirect.valid` → `stage2Flush = true`
-2. `backendFlush = stage2Flush || RegNext(stage2Flush)` (2 사이클)
-3. `allowBpuIn = allowToIfu = false` (flush 기간)
-4. `bpuPtr, ifuPtr, pfPtr` → redirect target 기반 복원
-5. `toBpu.redirect.valid` → BPU 이력 복원
-6. `icacheFlush` → ICache 파이프 무효화
+2. `backendFlush = stage2Flush || RegNext(stage2Flush)` (2 cycles)
+3. `allowBpuIn = allowToIfu = false` (flush period)
+4. `bpuPtr, ifuPtr, pfPtr` → redirect target-based restoration
+5. `toBpu.redirect.valid` → BPU history restoration
+6. `icacheFlush` → Invalidate ICache pipe
 7. `toIfu.redirect.valid` → IFU flush
 
 ### 5.6 BPU S2/S3 override
@@ -179,7 +179,7 @@ when(bpu_s3_redirect):
   toIfu.flushFromBpu.s3 := {valid=true, bits=ftq_idx}
 ```
 
-### 5.7 FTQ full 감지
+### 5.7 FTQ full detection
 
 - `validEntries = distanceBetween(bpuPtr, commPtr)` ≥ FtqSize → `new_entry_ready = false`
 - `io.fromBpu.resp.ready := new_entry_ready` → BPU back-pressure
@@ -188,41 +188,41 @@ when(bpu_s3_redirect):
 
 ## 6. Flow / Backpressure Control
 
-| 조건 | 동작 |
+| Conditions | Action |
 | ---- | ---- |
 | FTQ full | `io.fromBpu.resp.ready = false` → BPU stall |
-| backend redirect | `allowBpuIn/ToIfu = false` (2 사이클), bpuPtr/ifuPtr 복원 |
-| BPU s2/s3 redirect | bpuPtr 되감기, ifuPtr 되감기 (필요 시), flushFromBpu 전달 |
-| IFU not ready | `toIfu.req.ready = f1_ready && icacheReady` → ifuPtr 진행 안 함 |
+| backend redirect | `allowBpuIn/ToIfu = false` (2 cycles), restore bpuPtr/ifuPtr |
+| BPU s2/s3 redirect | Rewind bpuPtr, rewind ifuPtr (if needed), pass flushFromBpu |
+| IFU not ready | `toIfu.req.ready = f1_ready && icacheReady` → do not proceed with ifuPtr |
 | entry not f_to_send | `entry_is_to_send = false` → toIfu.req.valid = false |
-| ifuFlush | `allowToIfu = false` → IFU 요청 차단 |
-| MMIO commit wait | `mmioCommitRead.valid` + `mmioLastCommit` 기반 IFU 제어 |
+| ifuFlush | `allowToIfu = false` → Block IFU request |
+| MMIO commit wait | IFU control based on `mmioCommitRead.valid` + `mmioLastCommit` |
 
 ---
 
 ## 7. Error / Exception Handling
 
-| 상황 | 처리 |
+| Situation | processing |
 | ---- | ---- |
-| Backend IPF/IGF/IAF | `backendException` 레지스터 기록, `backendPcFaultPtr = ifuWbPtr` |
-| ICache backendException 전달 | `toICache.req.bits.backendException = backendPcFaultPtr === ifuPtr` |
-| IFU predecode mismatch (false hit) | `entry_hit_status := h_false_hit`, BPU에 false_hit 플래그 전달 |
-| fallThroughError | `entry_hit_status := h_false_hit` (FTB ghost entry 감지) |
-| FTBEntryGen mispred | `mispred_mask` 생성 → `toBpu.update.bits.mispred_mask` |
-| `XSError` 불변식 검사 | commPtr ≤ ifuWbPtr ≤ ifuPtr ≤ bpuPtr, IFU wb 순서 등 |
+| Backend IPF/IGF/IAF | Write register `backendException`, `backendPcFaultPtr = ifuWbPtr` |
+| throwing ICache backendException | `toICache.req.bits.backendException = backendPcFaultPtr === ifuPtr` |
+| IFU predecode mismatch (false hit) | `entry_hit_status := h_false_hit`, pass false_hit flag to BPU |
+| fallThroughError | `entry_hit_status := h_false_hit` (FTB ghost entry detection) |
+| FTBEntryGen mispred | Create `mispred_mask` → `toBpu.update.bits.mispred_mask` |
+| `XSError` invariant check | commPtr ≤ ifuWbPtr ≤ ifuPtr ≤ bpuPtr, IFU wb order, etc. |
 
 ---
 
 ## 8. Timing Hints
 
-| Critical Path | 설명 |
+| Critical Path | Description |
 | ------------- | ---- |
-| `entry_is_to_send` | `entry_fetch_status(ifuPtr.value) === f_to_send` — ifuPtr로 SRAM/레지스터 인덱스 |
-| `validEntries` | `distanceBetween(bpuPtr, commPtr)` — CircularQueuePtr 거리 계산, `io.fromBpu.resp.ready`에 직결 |
-| `toIfuPcBundle` mux | bypass / last_cycle_to_ifu_fire / otherwise 3-way mux — SRAM rdata latency 포함 |
-| `commitStateQueueReg` | FtqSize × PredictWidth 2-bit 레지스터 — copyNum 분할로 팬아웃 감소 |
-| backend redirect ahead | `ftqIdxAhead / ftqIdxSelOH`: redirect cycle을 1 사이클 앞당겨 `realAhdValid` |
-| `FTBEntryGen` | combinational: br slot 삽입/이동 로직, pftAddr 계산 |
+| `entry_is_to_send` | `entry_fetch_status(ifuPtr.value) === f_to_send` — SRAM/register index with ifuPtr |
+| `validEntries` | `distanceBetween(bpuPtr, commPtr)` — CircularQueuePtr distance calculation, directly connected to `io.fromBpu.resp.ready` |
+| `toIfuPcBundle` mux | bypass / last_cycle_to_ifu_fire / otherwise 3-way mux — with SRAM rdata latency |
+| `commitStateQueueReg` | FtqSize × PredictWidth 2-bit register — Reduce fanout by splitting copyNum |
+| backend redirect ahead | `ftqIdxAhead / ftqIdxSelOH`: Advance the redirect cycle by 1 cycle `realAhdValid` |
+| `FTBEntryGen` | combinational: br slot insertion/move logic, pftAddr calculation |
 
 ---
 
@@ -251,7 +251,7 @@ on ifu_wb_valid:
   commitStateQueue(idx)[valid && inRange] := c_toCommit
   ifuWbPtr += 1
   if hit && misOffset.valid:
-    has_false_hit = true → BPU update (false hit 처리)
+has_false_hit = true → BPU update (false hit processing)
 
 // Commit
 when canCommit:
@@ -262,11 +262,11 @@ when canCommit:
 // Backend redirect
 on fromBackend.redirect.valid:
   stage2Flush = true  // → allowBpuIn/ToIfu = false
-  bpuPtr, ifuPtr, pfPtr 복원
-  toBpu.redirect.valid = true  // BPU 이력 복원
+Restore bpuPtr, ifuPtr, pfPtr
+toBpu.redirect.valid = true // Restore BPU history
   toIfu.redirect.valid = true  // IFU flush
   icacheFlush = true
-  [+1 cycle] backendFlush=true (2 사이클 지속)
+[+1 cycle] backendFlush=true (lasts 2 cycles)
 
 // BPU S2/S3 override
 on bpu_s2_redirect:
@@ -279,9 +279,9 @@ on bpu_s2_redirect:
 
 ## 10. Notes / Assumptions
 
-- `copyNum=5`: ICache 5포트 및 BPU 포인터 팬아웃 분산을 위해 레지스터 복제
-- `last_cycle_bpu_in` 1-사이클 지연: BPU enqueue critical path 차단 — `entry_fetch_status` 갱신이 enqueue 다음 사이클에 발생하므로 bypass 로직 필요
-- `bpu_in_bypass_buf`: BPU가 enqueue한 PC를 SRAM을 거치지 않고 직접 IFU에 공급 (1-entry bypass)
-- `validEntries < FtqSize || canCommit`: FTQ full 조건에서도 commit이 발생하면 enqueue 허용 (deadlock 방지)
-- `FtqRedirectAheadNum`: Backend가 redirect를 1 사이클 앞당겨 예고(`ftqIdxAhead`) → `realAhdValid`로 redirect latency 단축
-- `backendException` 레지스터: Backend로부터 받은 IPF/IAF 정보를 IFU writeback 완료 전까지 유지 — IFU가 해당 엔트리를 writeback해야 예외가 확정됨
+- `copyNum=5`: Register replication for ICache 5-port and BPU pointer fanout distribution
+- `last_cycle_bpu_in` 1-cycle delay: BPU enqueue critical path blocked — `entry_fetch_status` update occurs in the next enqueue cycle, so bypass logic is required
+- `bpu_in_bypass_buf`: PC enqueued by BPU is supplied directly to IFU without going through SRAM (1-entry bypass)
+- `validEntries < FtqSize || canCommit`: Allow enqueue if commit occurs even under FTQ full condition (prevent deadlock)
+- `FtqRedirectAheadNum`: Backend announces redirect 1 cycle earlier (`ftqIdxAhead`) → Redirect latency is reduced to `realAhdValid`
+- `backendException` Register: Maintains IPF/IAF information received from Backend until IFU writeback is completed — Exception is confirmed only when IFU writes back the entry

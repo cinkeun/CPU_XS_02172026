@@ -1,46 +1,46 @@
-# abtb (AheadBtb) 분석
+# abtb (AheadBtb) analysis
 
-> 분석 기준: BTB_analysis_rule.md
-> 분석 대상: `src/main/scala/xiangshan/frontend/bpu/abtb/`
-> Code-based only — 사전 지식/web-search 사용 금지
+> Analysis criteria: BTB_analysis_rule.md
+> Analysis target: `src/main/scala/xiangshan/frontend/bpu/abtb/`
+> Code-based only — No use of prior knowledge/web-search
 
 ---
 
-## 1.1 BTB 종류 및 역할
+## 1.1 BTB types and roles
 
-AheadBtb는 **Block-type BTB**로, fetch block의 taken branch 후보(way들)를 예측한다.
-핵심은 "tag compare가 빠르다"가 아니라, **SRAM read + compare/select를 2-stage로 파이프라인**한다는 점이다.
+AheadBtb is **Block-type BTB**, which predicts the taken branch candidates (ways) of the fetch block.
+The key point is not that “tag compare is fast,” but that **SRAM read + compare/select are pipelined in 2-stage**.
 
-ABTB 내부 타이밍(PC_A -> PC_B 관점):
-1. Cycle N (abtb s0): `set/bank = f(PC_A)`로 SRAM read 요청
-2. Cycle N+1 (abtb s1): SRAM 응답(`entries@PC_A`) 수신, 동시에 `io.startPc`(=PC_B)를 s2용으로 래치
-3. Cycle N+2 (abtb s2): `tag = getTag(PC_B)`와 `entries@PC_A`를 비교해 hit/select 후 예측 출력
+ABTB internal timing (PC_A -> PC_B perspective):
+1. Cycle N (abtb s0): SRAM read request with `set/bank = f(PC_A)`
+2. Cycle N+1 (abtb s1): Receive SRAM response (`entries@PC_A`), simultaneously latching `io.startPc` (=PC_B) for s2
+3. Cycle N+2 (abtb s2): Compare `tag = getTag(PC_B)` and `entries@PC_A` and output prediction after hit/select
 
-즉, **tag matching 자체는 s2 조합 1 cycle**이지만, 그 전에 **SRAM read 1 cycle**이 필요해서
-ABTB 내부 latency는 2 cycle(s0->s1->s2)이다.
-`ahead`의 의미는 latency를 1로 줄이는 것이 아니라, read 단계를 한 사이클 앞에 겹쳐서 **throughput 1/cycle**을 맞추는 것이다.
+In other words, **tag matching itself is s2 combination 1 cycle**, but **SRAM read 1 cycle** is required before that.
+ABTB internal latency is 2 cycles (s0->s1->s2).
+The meaning of `ahead` is not to reduce latency to 1, but to match **throughput 1/cycle** by overlapping the read stage one cycle in front.
 
-예측 거리(기준 PC를 명시해야 혼동이 없다):
-- **BPU s0 입력 PC(PC_A) 기준**: `PC_A -> PC_B -> PC_C`로 이어지는 **two-block-ahead 성격**
-- **BPU s1의 현재 block(PC_B) 기준**: `PC_B -> PC_C` 예측이므로 **non-lookahead**
+Prediction distance (reference PC must be specified to avoid confusion):
+- **Based on BPU s0 input PC (PC_A)**: **two-block-ahead nature leading to `PC_A -> PC_B -> PC_C`**
+- **Based on current block (PC_B) of BPU s1**: `PC_B -> PC_C` prediction, so **non-lookahead**
 
-즉, "non-lookahead"는 s1의 current-block 기준에서만 성립한다.
+In other words, “non-lookahead” is established only based on the current-block of s1.
 
 ```
 // Source: abtb/AheadBtb.scala:106-116 (s0 stage)
-private val s0_previousStartPc = io.startPc  // read 주소를 만들 PC (앞단 block 기준)
+private val s0_previousStartPc = io.startPc // PC to create read address (based on previous block)
 private val s0_setIdx   = getSetIndex(s0_previousStartPc)
 private val s0_bankIdx  = getBankIndex(s0_previousStartPc)
-// → SRAM read를 s0에서 s0_previousStartPc로 시작
+// → Start SRAM read from s0 to s0_previousStartPc
 
 // Source: abtb/AheadBtb.scala:124 (s1 stage)
-private val s1_startPc = io.startPc  // 현재 cycle의 live PC (s2에서 tag 비교용)
-// → tag 비교는 s2에서 s2_startPc(= RegEnable(s1_startPc))로 수행
+private val s1_startPc = io.startPc // live PC of current cycle (for tag comparison in s2)
+// → tag comparison is performed from s2 to s2_startPc (= RegEnable(s1_startPc))
 ```
 
-| BTB  | Type   | Block Width            | Predict Distance              | 설명 |
+| BTB | Type | Block Width | Predict Distance | Description |
 |------|--------|------------------------|-------------------------------|------|
-| abtb | Block  | FetchBlockSize (bytes) | s0(PC_A) 기준: two-block-ahead / s1(PC_B) 기준: 현재 block → 다음 block | 1024-entry, SRAM-based, lookahead-read |
+| abtb | Block | FetchBlockSize (bytes) | Based on s0(PC_A): two-block-ahead / Based on s1(PC_B): Current block → next block | 1024-entry, SRAM-based, lookahead-read |
 
 ---
 
@@ -64,7 +64,7 @@ private val sram = Module(new SplittedSRAMTemplate(
 ))
 ```
 
-### TakenCounter (레지스터, AheadBtb top-level)
+### TakenCounter (register, AheadBtb top-level)
 
 ```scala
 // Source: abtb/AheadBtb.scala:57-63
@@ -79,22 +79,22 @@ private val takenCounter = RegInit(
 
 | Memory         | Depth                      | Width (bit)              | Banks | Read Ports         | Write Ports |
 |----------------|----------------------------|--------------------------|-------|--------------------|-------------|
-| SRAM (entry)   | 32 sets × 8 ways = 256     | AheadBtbEntry 크기       | 4     | 1/bank (single-port, read priority) | 1/bank (write buffer로 큐잉, size=4) |
-| takenCounter   | 4 banks × 32 sets × 8 ways | TakenCounterWidth = 2-bit | 4 (Reg array 차원) | 전체 병렬 read    | 조건부 update (t1에서) |
+| SRAM (entry) | 32 sets × 8 ways = 256 | AheadBtbEntry size | 4 | 1/bank (single-port, read priority) | 1/bank (queue to write buffer, size=4) |
+| takenCounter | 4 banks × 32 sets × 8 ways | TakenCounterWidth = 2-bit | 4 (Reg array dimension) | Full parallel read | conditional update (at t1) |
 
 - NumEntries = 1024, NumBanks = 4, NumWays = 8, NumSets = 1024/8/4 = **32**
-- SRAM single-port → read와 write가 동시에 오면 write buffer(size=4)에 큐잉, read 우선
+- SRAM single-port → If read and write occur at the same time, queue in write buffer (size=4), read takes priority.
 
 ---
 
-## 1.3 BTB memory entry 설명
+## 1.3 BTB memory entry description
 
 ```scala
 // Source: abtb/Bundles.scala:83-91
 class AheadBtbEntry(implicit p: Parameters) extends AheadBtbBundle {
   val valid:           Bool            = Bool()
   val tag:             UInt            = UInt(TagWidth.W)           // 24-bit partial tag
-  val position:        UInt            = UInt(CfiPositionWidth.W)   // fetch block 내 branch 위치
+val position: UInt = UInt(CfiPositionWidth.W) // branch position in fetch block
   val attribute:       BranchAttribute = new BranchAttribute
   val targetLowerBits: UInt            = UInt(TargetLowerBitsWidth.W) // 22-bit partial target
   val targetCarry: Option[TargetCarry] = if (EnableTargetFix) Option(new TargetCarry) else None
@@ -103,30 +103,30 @@ class AheadBtbEntry(implicit p: Parameters) extends AheadBtbBundle {
 
 | Field Name        | Width (bit)                | Description |
 |-------------------|----------------------------|-------------|
-| valid             | 1                          | entry 유효 여부 |
-| tag               | 24 (TagWidth)              | PC[instOffsetBits + TagWidth - 1 : instOffsetBits] (bankIdx/setIdx 포함 범위) |
-| position          | CfiPositionWidth           | fetch block 내 branch 위치 |
+| valid | 1 | entry validity |
+| tag | 24 (TagWidth) | PC[instOffsetBits + TagWidth - 1 : instOffsetBits] (range including bankIdx/setIdx) |
+| position | CfiPositionWidth | Branch location within fetch block |
 | attribute         | 4                          | BranchAttribute (branchType 2-bit + rasAction 2-bit) |
-| targetLowerBits   | 22 (TargetLowerBitsWidth)  | target 하위 비트 (2B-aligned) |
-| targetCarry       | 2 (opt)                    | EnableTargetFix=false 기본 → 미포함 |
+| targetLowerBits | 22 (TargetLowerBitsWidth) | target lower bit (2B-aligned) |
+| targetCarry | 2 (opt) | EnableTargetFix=false Default → Not Included |
 
-### Tag 구조 (lookahead-read의 핵심)
+### Tag structure (the core of lookahead-read)
 
 ```scala
 // Source: abtb/Helpers.scala:24-35
 val addrFields = AddrField(
   Seq(
-    ("instOffset", instOffsetBits),  // PC 하위 비트 (block 내 반 워드 오프셋)
-    ("bankIdx",    BankIdxWidth),    // → SRAM read index (s0_previousStartPc 사용)
-    ("setIdx",     SetIdxWidth)      // → SRAM read index (s0_previousStartPc 사용)
+("instOffset", instOffsetBits), // PC low-order bits (half word offset within block)
+("bankIdx", BankIdxWidth), // → SRAM read index (using s0_previousStartPc)
+("setIdx", SetIdxWidth) // → SRAM read index (using s0_previousStartPc)
   ),
   extraFields = Seq(
-    ("tag",         instOffsetBits, TagWidth),           // → tag 비교 (s1_startPc 사용)
+("tag", instOffsetBits, TagWidth), // → tag comparison (using s1_startPc)
     ("targetLower", instOffsetBits, TargetLowerBitsWidth)
   )
 )
-// tag는 instOffsetBits부터 시작 → bankIdx/setIdx 필드와 겹치는 범위 포함
-// 즉, 이전 PC의 bank/set으로 읽고, 현재 PC의 tag로 비교하는 구조
+// tag starts from instOffsetBits → includes range overlapping with bankIdx/setIdx fields
+// In other words, a structure that reads from the bank/set of the previous PC and compares it with the tag of the current PC.
 ```
 
 ---
@@ -149,28 +149,28 @@ private val s1_takenMask = VecInit(s1_btbPrediction.zipWithIndex.map { case (pre
 })
 ```
 
-| BTB  | Paired Unit       | 역할                               | 결합 방식 |
+| BTB | Paired Unit | role | Combination method |
 |------|-------------------|------------------------------------|-----------|
-| abtb | MicroTage (utage) | 조건부 branch 방향 결정 (override)  | abtb entry hit + position 일치 시 utage.taken 사용 |
-| abtb | MicroRas (uras)   | return address 제공                | s1_prediction.attribute.isReturn이면 uras.retTarget 사용 |
+| abtb | MicroTage (utage) | Conditional branch direction determination (override) | When matching abtb entry hit + position, use utage.taken |
+| abtb | MicroRas (uras) | return address provided | If s1_prediction.attribute.isReturn, use uras.retTarget |
 
-- abtb 8 way + ubtb 1 way = 총 9개 s1_btbPrediction 슬롯 중 첫 번째 taken branch 선택
-- 조건부 branch의 방향 최종 결정: utage hit 여부에 따라 utage.taken 또는 abtb.taken
+- abtb 8 way + ubtb 1 way = Select the first taken branch among a total of 9 s1_btbPrediction slots
+- Final decision on direction of conditional branch: utage.taken or abtb.taken depending on whether utage hit or not
 
 ---
 
-## 1.5 다음 예측 pseudocode
+## 1.5 Next prediction pseudocode
 
 ```text
 onPredict(PC_A, PC_B):
   // --- abtb s0 ---
-  // PC_A로 read를 "먼저" 걸어 둔다.
+// Read “first” with PC_A.
   bank.readReq(setIdx = getSetIndex(PC_A),
                bankMask = UIntToOH(getBankIndex(PC_A)))
 
   // --- abtb s1 ---
-  // 직전 cycle read 응답은 PC_A 기반 row.
-  // 동시에 현재 예측 대상 PC_B를 s2용으로 래치.
+// The previous cycle read response is a PC_A-based row.
+// At the same time, latch the current prediction target PC_B for s2.
   s1_startPc = io.startPc   // = PC_B
   entries = bank.readResp() // entries@PC_A
 
@@ -180,11 +180,11 @@ onPredict(PC_A, PC_B):
   s2_tag = getTag(s2_startPc)                   // getTag(PC_B)
   s2_hitMask[i] = s2_entries[i].valid && s2_entries[i].tag === s2_tag
 
-  // 다중 hit(같은 position) 감지 → multi-hit 발생 시 하나를 무효화
+// Detect multiple hits (same position) → Invalidate one when multiple hits occur
   if detectMultiHit(s2_hitMask, s2_entries.map(_.position)):
     bank.writeInvalidate(multiHitWayIdx)
 
-  // taken counter로 방향 결정
+// Determine direction with taken counter
   s2_ctrResult[i] = takenCounter[bankIdx][setIdx][i].isPositive
 
   for i in 0..NumWays-1:
@@ -194,7 +194,7 @@ onPredict(PC_A, PC_B):
     prediction[i].attribute   = s2_entries[i].attribute
     prediction[i].target      = getFullTarget(s2_startPc, s2_entries[i].targetLowerBits)
 
-  // BPU top에서 utage 방향 override 가능 (조건부 branch에 한함)
+// Can override utage direction from BPU top (limited to conditional branch)
   for i in 0..8 (ubtb+abtb):
     if utage.hit && position match:
       s1_takenMask[i].taken = utage.taken
@@ -202,14 +202,14 @@ onPredict(PC_A, PC_B):
 
 ---
 
-## 1.6 Input-to-output latency 및 throughput
+## 1.6 Input-to-output latency and throughput
 
 | BTB  | Input Stage  | Output Stage        | Latency (cycle) | Throughput (pred/cycle) |
 |------|--------------|---------------------|-----------------|--------------------------|
-| abtb | abtb s0 (BPU s0) | abtb s2 (BPU s1 출력) | 2 (내부 s0→s1→s2) | 1 |
+| abtb | abtb s0 (BPU s0) | abtb s2 (BPU s1 output) | 2 (inside s0→s1→s2) | 1 |
 
-- 내부 파이프라인: s0 (SRAM read req) → s1 (entries 도착, s1_startPc 래치) → s2 (tag 비교, 출력)
-- BPU 관점에서는 s1 시점에 예측 결과가 유효 (s2_valid = true after s1_fire)
+- Internal pipeline: s0 (SRAM read req) → s1 (entries arrival, s1_startPc latch) → s2 (tag comparison, output)
+- From a BPU perspective, the prediction result is valid at s1 (s2_valid = true after s1_fire)
 - predictionSent = io.stageCtrl.s1_fire (BPU s1_fire) → abtb s2_fire trigger
 
 ```scala
@@ -221,16 +221,16 @@ s2_fire := io.enable && s2_valid && predictionSent  // predictionSent = io.stage
 
 ---
 
-## 1.7 Pipeline stage 위치
+## 1.7 Pipeline stage location
 
 | Signal                 | Produced @ Stage         | Consumed @ Stage   | Timing Note |
 |------------------------|--------------------------|--------------------|-------------|
-| s0_previousStartPc     | BPU s0 (io.startPc)      | abtb s0            | bank.readReq에 직결 |
+| s0_previousStartPc | BPU s0 (io.startPc) | abtb s0 | Directly connected to bank.readReq |
 | bank.readResp.entries  | abtb s1 (SRAM latency 1) | abtb s1            | s1_entries = Mux1H(bankMask, ...) |
-| s1_startPc             | abtb s1 (새 io.startPc)  | abtb s2            | `RegEnable(s1_startPc, s1_fire)` |
+| s1_startPc | abtb s1 (new io.startPc) | abtb s2 | `RegEnable(s1_startPc, s1_fire)` |
 | s2_entries             | abtb s2                  | abtb s2            | `RegEnable(entries, s1_fire)` |
 | io.prediction[0..7]    | abtb s2                  | BPU s1             | s2_valid = true |
-| io.meta                | abtb s2                  | BPU s2→s3 (fastTrain 용) | `s2_abtbMeta = RegEnable(abtb.io.meta, s1_fire)` |
+| io.meta | abtb s2 | BPU s2→s3 (for fastTrain) | `s2_abtbMeta = RegEnable(abtb.io.meta, s1_fire)` |
 
 ```scala
 // Source: abtb/AheadBtb.scala:143-145, 148-152
@@ -238,17 +238,17 @@ private val s2_setIdx   = RegEnable(Mux(overrideValid, s3_setIdx, s1_setIdx), s1
 private val s2_entries  = RegEnable(Mux(overrideValid, s3_entries, s1_entries), s1_fire)
 private val s2_startPc  = RegEnable(s1_startPc, s1_fire)
 
-// overrideValid 시 s3 (이전 s2) 값을 재사용하여 한 사이클 빠른 재예측
+// When overrideValid, re-predict one cycle faster by reusing the s3 (previous s2) value
 s2_ready := s2_fire || !s2_valid || overrideValid || redirectValid
 ```
 
-- **Override 발생 시**: s3 레지스터(이전 s2 결과)를 s2로 재공급하여 즉시 재예측 지원
+- **When Override occurs**: Supports immediate re-prediction by resupplying the s3 register (previous s2 result) to s2.
 
 ---
 
-## 1.8 BTB memory indexing hashing 방법
+## 1.8 BTB memory indexing hashing method
 
-### AddrField 레이아웃
+### AddrField Layout
 
 ```scala
 // Source: abtb/Helpers.scala:24-35
@@ -266,9 +266,9 @@ val addrFields = AddrField(
 )
 ```
 
-### SRAM 물리 구조
+### SRAM physics
 
-4개의 독립 bank로 구성되며, 각 bank가 32 sets × 8 ways SRAM을 가진다.
+It consists of 4 independent banks, and each bank has 32 sets × 8 ways SRAM.
 
 ```
 AheadBtb
@@ -280,7 +280,7 @@ AheadBtb
 
 ### Predict path: PC_A → bankIdx/setIdx, PC_B → tag
 
-abtb의 핵심 특성: SRAM index는 PC_A (s0_previousStartPc), tag 비교는 PC_B (s2_startPc).
+Key characteristics of abtb: SRAM index is PC_A (s0_previousStartPc), tag comparison is PC_B (s2_startPc).
 
 ```scala
 // Source: abtb/Helpers.scala:37-44
@@ -289,65 +289,65 @@ def getBankIndex(pc: PrunedAddr): UInt = addrFields.extract("bankIdx", pc)
 def getTag(pc: PrunedAddr): UInt       = addrFields.extract("tag",     pc)
 ```
 
-| Path | Field | PC 소스 | PC Bits | Width | History |
+| Path | Field | PC Source | PC Bits | Width | History |
 |------|-------|---------|---------|-------|---------|
-| Predict SRAM read | bankIdx | PC_A (s0_previousStartPc) | [2:1] | 2 | 없음 |
-| Predict SRAM read | setIdx | PC_A (s0_previousStartPc) | [7:3] | 5 | 없음 |
-| Predict tag compare | tag | PC_B (s2_startPc) | [24:1] | 24 | 없음 |
+| Predict SRAM read | bankIdx | PC_A (s0_previousStartPc) | [2:1] | 2 | None |
+| Predict SRAM read | setIdx | PC_A (s0_previousStartPc) | [7:3] | 5 | None |
+| Predict tag compare | tag | PC_B (s2_startPc) | [24:1] | 24 | None |
 
-### Bank → Set → Way 접근 순서
+### Bank → Set → Way access sequence
 
 ```scala
 // Source: abtb/AheadBtb.scala:110-130
-// s0: bankIdx로 해당 bank에만 read req, setIdx로 row 지정
+// s0: Read req only for the bank with bankIdx, specify row with setIdx
 val s0_bankMask = UIntToOH(s0_bankIdx)
 banks.zipWithIndex.foreach { case (b, i) =>
-  b.io.readReq.valid       := predictReqValid && s0_bankMask(i)  // 1개 bank만 활성
-  b.io.readReq.bits.setIdx := s0_setIdx                           // 32 sets 중 1 row
+b.io.readReq.valid := predictReqValid && s0_bankMask(i) // Only 1 bank is active
+b.io.readReq.bits.setIdx := s0_setIdx // 1 row out of 32 sets
 }
 
-// s1: 선택된 bank의 응답에서 8 ways 전부 수신
+// s1: Receive all 8 ways from the selected bank's response
 val s1_entries = Mux1H(s1_bankMask, banks.map(_.io.readResp.entries))  // Vec(8, AheadBtbEntry)
 
-// s2: 8 ways 각각 tag 비교 → hit mask (address select가 아닌 tag compare)
+// s2: 8 ways each tag comparison → hit mask (tag compare, not address select)
 s2_hitMask[i] = s2_entries[i].valid && s2_entries[i].tag === s2_tag
 prediction[i].valid = s2_valid && s2_hitMask[i]
 ```
 
-| 단계 | 동작 | PC 소스 | 결과 |
+| steps | Action | PC Source | Results |
 |------|------|---------|------|
-| s0: bank select | `bankIdx`=PC[2:1] → `UIntToOH` → 1개 bank에만 readReq | PC_A | 4 banks 중 1개 활성화 |
-| s0: set address | `setIdx`=PC[7:3] → SRAM row address | PC_A | 32 sets 중 1 row 지정 |
-| s1: row read | 선택된 bank → `Mux1H` → 8 ways 전부 반환 | — | Vec(8, AheadBtbEntry) |
-| s2: way 판별 | **tag compare** (address select 아님) `entry[i].tag === getTag(PC_B)` | PC_B | hitMask[0..7] |
+| s0: bank select | `bankIdx`=PC[2:1] → `UIntToOH` → readReq to only 1 bank | PC_A | 1 of 4 banks activated |
+| s0: set address | `setIdx`=PC[7:3] → SRAM row address | PC_A | Designate 1 row out of 32 sets |
+| s1: row read | Selected bank → `Mux1H` → Return all 8 ways | — | Vec(8, AheadBtbEntry) |
+| s2: way determination | **tag compare** (not address select) `entry[i].tag === getTag(PC_B)` | PC_B | hitMask[0..7] |
 
-- way 선택은 "주소 비트로 1개 선택"이 아니라 **8 ways 전부를 읽은 뒤 tag match**로 hit 여부 판별
-- 복수 hit(다른 way, 같은 position)가 발생할 수 있으며 multi-hit 시 하나를 무효화
-- BPU top에서 hit된 way들 중 `position`이 가장 앞선 taken branch를 최종 선택
+- Way selection is not “select one using the address bit”, but reads all 8 ways and determines whether it is a hit using tag match**.
+- Multiple hits (different ways, same position) may occur, and in case of multi-hit, one is invalidated.
+- Among the ways hit on the BPU top, `position` takes the leading branch and finally selects it.
 
-**tag overlap 설계**: `tag` extraField는 `instOffsetBits=1`에서 시작하여 24-bit 폭이므로 `bankIdx[2:1]`과 `setIdx[7:3]` bit range를 포함한다.
-이는 의도적 설계 — tag가 bankIdx/setIdx 범위 전체를 포함하여 cross-bank·cross-set 오인을 방지한다.
+**tag overlap design**: The `tag` extraField starts from `instOffsetBits=1` and is 24-bit wide, so it includes the `bankIdx[2:1]` and `setIdx[7:3]` bit ranges.
+This is by intentional design — the tag includes the entire bankIdx/setIdx range to prevent cross-bank·cross-set misidentification.
 
 ### Train path
 
 ```scala
-// Source: abtb/AheadBtb.scala (train 구현부)
-// t1 write 시: setIdx, bankMask → abtbMeta에서 복원 (predict 시점 저장값)
-//              tag             → getTag(t1_train.startPc) 직접 추출
+// Source: abtb/AheadBtb.scala (train implementation part)
+// When t1 write: setIdx, bankMask → Restore from abtbMeta (value saved at prediction time)
+// tag → getTag(t1_train.startPc) directly extracted
 ```
 
-| Path | Field | 소스 | Note |
+| Path | Field | Source | Note |
 |------|-------|------|------|
-| Train (t1) | setIdx | abtbMeta.setIdx | predict 시점에 저장된 값 재사용 |
-| Train (t1) | bankMask | abtbMeta.bankMask | predict 시점에 저장된 값 재사용 |
-| Train (t1) | tag | getTag(t1_train.startPc) | 직접 PC에서 추출 |
+| Train (t1) | setIdx | abtbMeta.setIdx | Reusing the value saved at predict time |
+| Train (t1) | bankMask | abtbMeta.bankMask | Reusing the value saved at predict time |
+| Train (t1) | tag | getTag(t1_train.startPc) | Extract directly from your PC |
 
-- history 사용: **없음**
-- hash 없음 (XOR/fold 미적용), PC 단순 bit extraction
+- Use history: **None**
+- No hash (XOR/fold not applied), PC simple bit extraction
 
 ---
 
-## 1.9 Training 방법
+## 1.9 Training method
 
 ### Trigger: fast-train (s3 finalPrediction + abtbMeta)
 
@@ -357,16 +357,16 @@ private val t0_train = io.fastTrain.get.bits
 private val t0_fire  = io.enable && io.fastTrain.get.valid &&
                        t0_train.finalPrediction.taken &&
                        t0_train.abtbMeta.valid
-// → 조건: s3 finalPrediction이 taken이고, abtbMeta가 유효한 경우에만 train
+// → Condition: train only if s3 finalPrediction is taken and abtbMeta is valid
 ```
 
 ```scala
 // Source: bpu/Bpu.scala:182-188
-fastTrain.bits.abtbMeta := s3_abtbMeta  // s2_abtbMeta를 s3로 래치한 값
+fastTrain.bits.abtbMeta := s3_abtbMeta // Value latched from s2_abtbMeta to s3
 // AheadBtbMeta: valid, setIdx, bankMask, entries[NumWays](hit, attribute, position, targetLowerBits)
 ```
 
-### BPU 내부 meta 전달 (AheadBtbMeta)
+### BPU internal meta delivery (AheadBtbMeta)
 
 ```scala
 // Source: abtb/Bundles.scala:69-81
@@ -384,18 +384,18 @@ class AheadBtbMeta(implicit p: Parameters) extends AheadBtbBundle {
 }
 ```
 
-### t1 train 동작
+### t1 train operation
 
 ```scala
 // Source: abtb/AheadBtb.scala:230-303 (simplified)
-// taken counter 갱신
+// update taken counter
 for each way:
   if cond && posBefore: decrease (branch before taken branch)
   if cond && posEqual:  increase (matching branch position)
-  if writeResp.needResetCtr: resetWeakPositive (새 entry 할당 시)
+if writeResp.needResetCtr: resetWeakPositive (when assigning a new entry)
 
-// entry 갱신
-if not hit (position+attribute 기준):
+// update entry
+if not hit (based on position+attribute):
   write new entry to victim way (PLRU)
 elif indirect && target mismatch:
   correct target in existing entry
@@ -403,22 +403,22 @@ elif indirect && target mismatch:
 
 | Trigger                                | Required FastTrain Info                    | Storage Path               | Write Port / Conflict Handling |
 |----------------------------------------|--------------------------------------------|----------------------------|--------------------------------|
-| s3_valid && finalPrediction.taken && abtbMeta.valid | startPc, finalPrediction (taken, position, target, attribute), abtbMeta (setIdx, bankMask, per-way hit/attr/pos/target) | `s2_abtbMeta -> s3_abtbMeta -> fastTrain` (FTQ 저장 없음) | SRAM single-port: read 우선, write는 write buffer(size=4) 큐잉 |
+| s3_valid && finalPrediction.taken && abtbMeta.valid | startPc, finalPrediction (taken, position, target, attribute), abtbMeta (setIdx, bankMask, per-way hit/attr/pos/target) | `s2_abtbMeta -> s3_abtbMeta -> fastTrain` (no FTQ storage) | SRAM single-port: read first, write queues write buffer (size=4) |
 
-- AheadBtbMeta는 BPU 내부 레지스터(`s2_abtbMeta`, `s3_abtbMeta`)로만 전달됨 (FTQ에 저장 안 됨)
-- write buffer full 시 write 요청이 drop됨 (`write_buffer_full_drop_write` perf counter)
+- AheadBtbMeta is only transferred to BPU internal registers (`s2_abtbMeta`, `s3_abtbMeta`) (not stored in FTQ)
+- When the write buffer is full, the write request is dropped (`write_buffer_full_drop_write` perf counter)
 
 ---
 
-## 1.10 Override 및 redirection
+## 1.10 Override and redirection
 
 ```scala
-// Source: abtb/AheadBtb.scala:80-99 (abtb 내부 flush/ready 로직)
+// Source: abtb/AheadBtb.scala:80-99 (abtb internal flush/ready logic)
 s2_flush := redirectValid            // backend redirect → abtb s2 flush
 s1_flush := s2_flush
 s2_ready := s2_fire || !s2_valid || overrideValid || redirectValid
-// overrideValid = s3_override (BPU top에서 주입)
-// → s3_override 발생 시 s2가 즉시 free되어 다음 사이클에 s3 값으로 재예측 가능
+// overrideValid = s3_override (injected from BPU top)
+// → When s3_override occurs, s2 is immediately freed and can be re-predicted with the s3 value in the next cycle.
 
 // Source: bpu/Bpu.scala:200-201
 abtb.io.redirectValid := redirect.valid
@@ -426,41 +426,41 @@ abtb.io.overrideValid := s3_override
 ```
 
 ```scala
-// Source: bpu/Bpu.scala:434-441 (BPU top next PC 선택)
+// Source: bpu/Bpu.scala:434-441 (Select BPU top next PC)
 s0_startPc := MuxCase(
   s0_startPcReg,
   Seq(
-    redirect.valid -> redirect.bits.target,   // 최우선: backend redirect
-    s3_override    -> s3_prediction.target,   // 2순위: mbtb s3 override
-    s1_valid       -> s1_prediction.target    // 3순위: abtb/ubtb s1 prediction
+redirect.valid -> redirect.bits.target, // priority: backend redirect
+s3_override -> s3_prediction.target, // 2nd priority: mbtb s3 override
+s1_valid -> s1_prediction.target // 3rd priority: abtb/ubtb s1 prediction
   )
 )
 ```
 
 | Condition               | Winner            | Redirect Target          | Side Effect (Flush/Replay) |
 |-------------------------|-------------------|--------------------------|----------------------------|
-| redirect.valid          | Backend           | redirect.bits.target     | abtb s2_flush, s1_flush; BPU 전체 파이프 flush |
-| s3_override             | mbtb s3 결과      | s3_prediction.target     | abtb s2_ready 즉시 free; s3 값으로 다음 사이클 재예측 |
-| !redirect && !s3_override && s1_taken | uBTB+ABTB 후보 중 first taken(min position) | s1_prediction.target | 없음 |
-| !redirect && !s3_override && !s1_taken | FallThrough       | s1_prediction.target     | 없음 |
+| redirect.valid | Backend | redirect.bits.target | abtb s2_flush, s1_flush; BPU entire pipe flush |
+| s3_override | mbtb s3 results | s3_prediction.target | abtb s2_ready immediately free; Reforecast next cycle with s3 value |
+| !redirect && !s3_override && s1_taken | first taken(min position) among uBTB+ABTB candidates | s1_prediction.target | None |
+| !redirect && !s3_override && !s1_taken | FallThrough | s1_prediction.target | None |
 
-- `s1_taken`과 `first taken(min position)` 선택은 BPU top(`s1_takenMask`, `CompareMatrix`, `s1_firstTakenBranch`)에서 결정됨
+- Selection of `s1_taken` and `first taken(min position)` is determined by BPU top (`s1_takenMask`, `CompareMatrix`, `s1_firstTakenBranch`)
   (`bpu/Bpu.scala:266-304`)
-- s3_override 시: abtb의 `s2_entries/s2_startPc`가 s3 값(`s3_entries/s3_setIdx/...`)으로 Mux 교체됨
-  → 별도 SRAM read 없이 1사이클 만에 mbtb 기반 재예측 가능
+- When s3_override: `s2_entries/s2_startPc` in abtb is replaced by Mux with s3 value (`s3_entries/s3_setIdx/...`)
+→ mbtb-based re-prediction possible in 1 cycle without separate SRAM read
 
 ---
 
-## 품질 체크리스트
+## Quality Checklist
 
-- [x] 1.1~1.10 순서 준수
-- [x] memory depth/width/banks/read/write ports 명시
-- [x] memory entry 코드 snippet 포함
-- [x] field별 width/description 표 완성
-- [x] pair predictor 결합 규칙 명시 (utage, uras)
-- [x] pseudocode 포함
-- [x] latency/throughput 수치화 (2 cycle 내부, BPU s1 출력)
-- [x] stage 입력/출력 타이밍 명시
-- [x] indexing/hash 식 + PC/history bit position 명시
-- [x] training trigger/FTQ 저장/meta fields/port conflict 처리 명시
-- [x] override/redirection 우선순위 및 근거 명시
+- [x] Comply with order 1.1~1.10
+- [x] specify memory depth/width/banks/read/write ports
+- [x] Includes memory entry code snippet
+- [x] Completion of width/description table for each field
+- [x] Specify pair predictor combination rules (utage, uras)
+- Includes [x] pseudocode
+- [x] latency/throughput quantification (2 cycle internal, BPU s1 output)
+- [x] stage input/output timing specified
+- [x] indexing/hash expression + PC/history bit position specified
+- [x] Specify training trigger/FTQ storage/meta fields/port conflict processing
+- [x] Override/redirection priority and rationale specified

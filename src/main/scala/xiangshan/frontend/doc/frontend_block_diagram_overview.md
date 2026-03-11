@@ -11,29 +11,29 @@
 
 ## 1. Block Summary
 
-XiangShan Frontend는 BPU(분기 예측) → FTQ(Fetch Target Queue) → IFU(명령어 패치) → IBuffer(명령어 버퍼) → Backend(디코드)로 이어지는 비순차적 명령어 공급 파이프라인이다.
+XiangShan Frontend is a non-sequential instruction supply pipeline that goes from BPU (Branch Prediction) → FTQ (Fetch Target Queue) → IFU (Instruction Fatch) → IBuffer (Instruction Buffer) → Backend (Decode).
 
-- **주요 입력**: Backend로부터 오는 redirect (misprediction flush), sfence, tlbCsr, csrCtrl
-- **주요 출력**: `io.backend.cfVec` (DecodeWidth개 CtrlFlow, IBuffer → Decode), `io.backend.stallReason` (stall 원인 정보)
-- **성능/병목**: ICache miss (IFU stall), FTQ full (BPU back-pressure), IBuffer full (fetch stall), misprediction redirect flush
+- **Main input**: redirect (misprediction flush), sfence, tlbCsr, csrCtrl from Backend
+- **Main output**: `io.backend.cfVec` (DecodeWidth CtrlFlow, IBuffer → Decode), `io.backend.stallReason` (stall cause information)
+- **Performance/bottleneck**: ICache miss (IFU stall), FTQ full (BPU back-pressure), IBuffer full (fetch stall), misprediction redirect flush
 
 ---
 
 ## 2. Key Parameters
 
-| Parameter           | Source                                             | Default / 일반값 | 영향                                       |
+| Parameter | Source | Default / Normal value | Impact |
 | ------------------- | -------------------------------------------------- | --------------- | ------------------------------------------ |
-| FtqSize             | `FtqParameters.FtqSize`                            | 64              | FTQ 엔트리 수 (BPU-IFU 버퍼 깊이)          |
-| IBuffer.Size        | `IBufferParameters.Size`                           | 48              | IBuffer 총 엔트리 수                        |
-| NumWriteBank        | `IBufferParameters.NumWriteBank`                   | 4               | IBuffer 쓰기 뱅크 수 (IFU pre-align용)     |
-| NumReadBank         | `IBufferParameters.NumReadBank`                    | 8               | IBuffer 읽기 뱅크 수 (≥ DecodeWidth)        |
-| FetchBlockInstNum   | `FetchBlockSize(64B) / instBytes`                  | 16 or 32        | 한 fetch 블록당 최대 명령어 수              |
-| DecodeWidth         | `p(XSCoreParamsKey).DecodeWidth`                   | 6               | IBuffer → Decode 동시 출력 너비            |
-| PhrHistoryLength    | `FrontendParameters.getPhrHistoryLength`           | 계산값           | PHR(Path History Register) 길이            |
-| GhrHistoryLength    | `HasBpuParameters.GhrHistoryLength`                | SC 최대 table   | SC용 전역 분기 이력(GHR) 길이              |
-| ResolveEntryBranchNumber | `FrontendParameters.ResolveEntryBranchNumber` | 8               | FTQ resolve 엔트리당 최대 분기 슬롯 수      |
-| ipmpPortNum         | `coreParams.ipmpPortNum`                           | ICache ports    | PMP checker 포트 수                        |
-| itlbPortNum         | `coreParams.itlbPortNum`                           | 1               | iTLB 포트 수                               |
+| FtqSize | `FtqParameters.FtqSize` | 64 | Number of FTQ entries (BPU-IFU buffer depth) |
+| IBuffer.Size | `IBufferParameters.Size` | 48 | IBuffer total number of entries |
+| NumWriteBank | `IBufferParameters.NumWriteBank` | 4 | Number of IBuffer write banks (for IFU pre-align) |
+| NumReadBank | `IBufferParameters.NumReadBank` | 8 | Number of IBuffer read banks (≥ DecodeWidth) |
+| FetchBlockInstNum | `FetchBlockSize(64B) / instBytes` | 16 or 32 | Maximum number of instructions per fetch block |
+| DecodeWidth | `p(XSCoreParamsKey).DecodeWidth` | 6 | IBuffer → Decode simultaneous output width |
+| PhrHistoryLength | `FrontendParameters.getPhrHistoryLength` | calculated value | PHR (Path History Register) length |
+| GhrHistoryLength | `HasBpuParameters.GhrHistoryLength` | SC max table | Global branch history (GHR) length for SC |
+| ResolveEntryBranchNumber | `FrontendParameters.ResolveEntryBranchNumber` | 8 | Maximum number of branch slots per FTQ resolve entry |
+| ipmpPortNum | `coreParams.ipmpPortNum` | ICache ports | Number of PMP checker ports |
+| itlbPortNum | `coreParams.itlbPortNum` | 1 | Number of iTLB ports |
 
 ---
 
@@ -73,7 +73,7 @@ flowchart LR
   end
  subgraph IBuf["IBuffer"]
         IBOUT["Output Reg\nDecodeWidth"]
-        IBK["IBufNBank 뱅크\n(Banked FIFO)"]
+IBK["IBufNBank bank\n(Banked FIFO)"]
   end
     BS0 -- s0_fire RegEnable --> BS1
     BS1 -- s1_fire RegEnable --> BS2
@@ -106,63 +106,63 @@ flowchart LR
     IFU -. mmioCommitRead .-> FTQ
 ```
 
-### 5.7 BPU 내부 s3_override
+### 5.7 BPU internal s3_override
 
-- S3 결과가 S1 예측과 다를 때 `s3_override = true` (`Bpu.scala:380`: `s3_valid && !(s3_prediction === s3_s1Prediction)`)
-- override 발생 시 FTQ로 S3 예측 결과를 재전송 (`io.toFtq.prediction.bits.s3Override := s3_override`)
-- S2 단계의 별도 override는 없으며, `s3_flush`가 발생하면 S2/S1도 함께 flush됨
-- FTQ에서 IFU에게 `flushFromBpu` 전달 → IFU F0 단계에서 소비
+- `s3_override = true` (`Bpu.scala:380`: `s3_valid && !(s3_prediction === s3_s1Prediction)`) when S3 results differ from S1 predictions
+- When override occurs, retransmit S3 prediction results to FTQ (`io.toFtq.prediction.bits.s3Override := s3_override`)
+- There is no separate override of the S2 stage, and when `s3_flush` occurs, S2/S1 are also flushed.
+- `flushFromBpu` delivered from FTQ to IFU → consumed at IFU F0 stage
 
 ---
 
 ## 6. Error / Exception Paths
 
-### 6.1 iTLB 예외 (PF / GPF / AF)
+### 6.1 iTLB Exceptions (PF/GPF/AF)
 
-- ICache → iTLB 요청 → `ExceptionType.fromTlbResp(resp)` → `fromICache.bits.exception` → IFU F2에서 수신
-- `f2_exception_vec` 생성 → F3에서 `IBuffer.exceptionType`에 저장 → Decode까지 전달
+- ICache → iTLB request → `ExceptionType.fromTlbResp(resp)` → `fromICache.bits.exception` → receive from IFU F2
+- Create `f2_exception_vec` → Save to `IBuffer.exceptionType` at F3 → Pass to Decode
 
-### 6.2 PMP 접근 예외 (AF)
+### 6.2 PMP Access Exception (AF)
 
-- `ExceptionType.fromPMPResp(resp)` → ICache 응답에 병합 → 동일 경로 전달
+- `ExceptionType.fromPMPResp(resp)` → merge into ICache response → forward the same path
 
 ### 6.3 ECC / TileLink corrupt (AF)
 
 - `ExceptionType.fromECC(enable, corrupt)` / `fromTilelink(corrupt)`
-- ICache 내부에서 `io.error` Valid 출력 → `errorReg = RegNext(icache.io.error)` → `io.error` L1BusErrorUnit 전달 (`Frontend.scala:262-263`)
+- Output `io.error` Valid inside ICache → `errorReg = RegNext(icache.io.error)` → `io.error` L1BusErrorUnit delivered (`Frontend.scala:262-263`)
 
-### 6.4 MMIO 명령어 처리
+### 6.4 MMIO command processing
 
-- IFU F3: `f3_pmp_mmio` 감지 → `InstrUncache` 경유 (64-bit 단위 fetch)
-- MMIO flush: `mmio_redirect` → F2/F3 flush, FTQ에 snpc redirect
-- ROB commit 확인 후 다음 MMIO fetch: `mmioCommitRead ↔ FTQ`
+- IFU F3: Detect `f3_pmp_mmio` → Via `InstrUncache` (64-bit unit fetch)
+- MMIO flush: `mmio_redirect` → F2/F3 flush, snpc redirect to FTQ
+- After confirming ROB commit, next MMIO fetch: `mmioCommitRead ↔ FTQ`
 
-### 6.5 예외 우선순위 (ExceptionType.merge)
+### 6.5 Exception priority (ExceptionType.merge)
 
-`iTLB(PF/GPF/AF) > PMP(AF) > ECC(AF)` — `ExceptionType.merge(...)` 함수 참조 (FrontendBundle.scala:191)
+`iTLB(PF/GPF/AF) > PMP(AF) > ECC(AF)` — `ExceptionType.merge(...)` function reference (FrontendBundle.scala:191)
 
 ---
 
 ## 7. Timing Hints
 
-| 모듈 | Critical Path 후보 | 설명 |
+| module | Critical Path Candidate | Description |
 | ---- | ------------------ | ---- |
-| IFU F1 | PC 계산 adder | `f1_pc_lower_result` 16개 adder 병렬 (`CatPC` 최적화 적용) |
-| IFU F2 | ICache resp addr match | `fromICache.bits.vaddr(0) === f2_ftq_req.startAddr` — timing critical 주석 존재 (IFU.scala:366) |
-| BPU S2/S3 | TAGE/SC multi-table lookup | 다수 folded history XOR + SRAM 읽기 |
-| FTQ | FtqPtr 비교 | `isAfter` 함수 사용, 64-entry circular queue 비교 |
-| IBuffer | enqOffset PopCount | `enqOffset = PopCount(io.in.bits.valid.take(i))` — PredictWidth(16) 너비 |
-| BPU → IFU | `flushFromBpu.shouldFlushByStage2/3` | FtqPtr 비교로 flush 여부 판단, IFU F0에서 지연 없이 소비해야 함 |
+| IFU F1 | PC calculation adder | `f1_pc_lower_result` 16 adders in parallel (`CatPC` optimization applied) |
+| IFU F2 | ICache resp addr match | `fromICache.bits.vaddr(0) === f2_ftq_req.startAddr` — timing critical annotation exists (IFU.scala:366) |
+| BPU S2/S3 | TAGE/SC multi-table lookup | Multiple folded history XOR + SRAM read |
+| FTQ | Compare FtqPtr | Using `isAfter` function, comparing 64-entry circular queue |
+| IBuffer | enqOffsetPopCount | `enqOffset = PopCount(io.in.bits.valid.take(i))` — PredictWidth(16) width |
+| BPU → IFU | `flushFromBpu.shouldFlushByStage2/3` | Determination of flush by comparing FtqPtr, must be consumed without delay at IFU F0 |
 
 ---
 
 ## 8. Open Questions / TODO
 
-- [ ] MMIO fetch latency: ROB commit wait이 얼마나 자주 발생하는가?
-- [ ] `numDup=4` 복제 구조의 타이밍 절감 효과 검증
-- [ ] `f2_mmio_mismatch_exception`: cacheable/non-cacheable 경계 crossing 케이스 처리 완전성
-- [ ] PTWFilter의 `ifilterSize` 파라미터가 iTLB 미스 빈도에 미치는 영향
-- [ ] IBuffer bypass 경로가 실제 waveform에서 얼마나 활용되는가?
+- [ ] MMIO fetch latency: How often does ROB commit wait occur?
+- [ ] Verification of timing saving effect of `numDup=4` replication structure
+- [ ] `f2_mmio_mismatch_exception`: Cacheable/non-cacheable boundary crossing case handling completeness
+- Effect of [ ] PTWFilter's `ifilterSize` parameter on iTLB miss frequency
+- [ ] How much is the IBuffer bypass path utilized in actual waveforms?
 
 ---
 

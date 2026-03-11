@@ -1,62 +1,62 @@
-# Full RAS (Ras + RasStack) 분석 리포트
+# Full RAS (Ras + RasStack) analysis report
 
-> **분석 원칙**: code-based only. web-search 및 사전 지식 기반 추론 금지.
-> **분석 대상**: `src/main/scala/xiangshan/frontend/bpu/ras/Ras.scala` + `RasStack.scala` + `Bundles.scala` + `Parameters.scala`
-> **코어/레포/커밋**: XiangShan / `kunminghu-v3` / `bfbb21862`
+> **Analysis Principle**: code-based only. No web-search and prior knowledge-based inferences.
+> **Analysis target**: `src/main/scala/xiangshan/frontend/bpu/ras/Ras.scala` + `RasStack.scala` + `Bundles.scala` + `Parameters.scala`
+> **Core/Repo/Commit**: XiangShan / `kunminghu-v3` / `bfbb21862`
 
 ---
 
-## 1. 구조 개요
+## 1. Structure overview
 
-Full RAS는 두 모듈로 구성:
+Full RAS consists of two modules:
 
-| 모듈 | 파일 | 역할 |
+| module | file | role |
 |---|---|---|
-| `Ras` | `Ras.scala` | 상위 래퍼. BPU 파이프라인과 인터페이스. push/pop/redirect/commit 라우팅 |
-| `RasStack` | `RasStack.scala` | 실제 메모리(specQueue, commitStack)와 포인터 관리 로직 |
+| `Ras` | `Ras.scala` | Top rapper. BPU pipeline and interface. push/pop/redirect/commit routing |
+| `RasStack` | `RasStack.scala` | Real memory (specQueue, commitStack) and pointer management logic |
 
-동작 파이프라인 위치: **S3** (`io.specIn.valid = s3_fire` 기반)
+Operation pipeline location: **S3** (based on `io.specIn.valid = s3_fire`)
 
 ---
 
-## 2. 파라미터
+## 2. Parameters
 
 ```scala
 // Source: Parameters.scala:21-27
 case class RasParameters(
-    CommitStackSize:   Int = 16,   // commitStack 깊이
-    SpecQueueSize:     Int = 32,   // specQueue 깊이 (반드시 pow2)
-    StackCounterWidth: Int = 3     // ctr 비트 폭 → max counter = 7
+CommitStackSize: Int = 16, // commitStack depth
+SpecQueueSize: Int = 32, // specQueue depth (must be pow2)
+StackCounterWidth: Int = 3 // ctr bit width → max counter = 7
 )
 ```
 
-| 파라미터 | 값 | 설명 |
+| parameters | value | Description |
 |---|---|---|
-| `CommitStackSize` | 16 | commit된 call/ret 기록 스택 깊이 |
-| `SpecQueueSize` | 32 | speculative push 엔트리 큐 깊이 |
-| `StackCounterWidth` | 3 | 동일 주소 연속 push 압축 카운터 폭 (max=7) |
+| `CommitStackSize` | 16 | Committed call/ret history stack depth |
+| `SpecQueueSize` | 32 | speculative push entry queue depth |
+| `StackCounterWidth` | 3 | Same address consecutive push compression counter width (max=7) |
 
 ---
 
-## 3. 메모리 구조
+## 3. Memory structure
 
-### 3.1 Entry 정의
+### 3.1 Entry definition
 
 ```scala
 // Source: Bundles.scala:27-30
 class RasEntry(implicit p: Parameters) extends RasBundle {
-  val retAddr: PrunedAddr = PrunedAddr(VAddrBits)  // 반환 주소 (상위 비트 pruning)
-  val ctr:     UInt       = UInt(StackCounterWidth.W)  // 연속 push 압축 카운터
+val retAddr: PrunedAddr = PrunedAddr(VAddrBits) // return address (pruning high-order bits)
+val ctr: UInt = UInt(StackCounterWidth.W) // Continuous push compression counter
 }
 ```
 
-**ctr 압축 동작**:
-- 같은 `retAddr`가 연속 push될 때 새 슬롯 없이 `ctr++`
-- pop 시 `ctr > 0`이면 `ctr--`만, `ctr == 0`이면 슬롯 해제
+**ctr compression behavior**:
+- `ctr++` without a new slot when the same `retAddr` is pushed consecutively
+- When popping, if `ctr > 0`, only `ctr--`, if `ctr == 0`, the slot is released.
 
-### 3.2 메모리 테이블
+### 3.2 Memory table
 
-| 메모리 | 타입 | Depth | Width | Read port | Write port |
+| memory | Type | Depth | Width | Read port | Write port |
 |---|---|---|---|---|---|
 | `specQueue` | `Vec[RasEntry]` | 32 | `retAddr + ctr(3)` | 1 (combinational) | 1 (1-cycle delayed) |
 | `specNos` | `Vec[RasPtr]` | 32 | 6-bit (ptr) | 1 | 1 |
@@ -71,7 +71,7 @@ private val specNos     = RegInit(VecInit(Seq.fill(SpecQueueSize)(...)))
 
 ---
 
-## 4. 포인터 정의
+## 4. Pointer definition
 
 ```scala
 // Source: RasStack.scala:71-78
@@ -80,21 +80,21 @@ private val ssp  = RegInit(0.U(log2Up(CommitStackSize).W))  // speculative commi
 private val sctr = RegInit(0.U(StackCounterWidth.W))         // speculative counter
 private val tosr = RegInit(RasPtr(true.B, (SpecQueueSize-1).U)) // spec queue read ptr
 private val tosw = RegInit(RasPtr(false.B, 0.U))             // spec queue write ptr
-private val bos  = RegInit(RasPtr(false.B, 0.U))             // bottom of spec queue (commit 기준선)
+private val bos = RegInit(RasPtr(false.B, 0.U)) // bottom of spec queue (commit baseline)
 ```
 
-| 포인터 | 설명 |
+| pointer | Description |
 |---|---|
-| `nsp` | commit stack의 현재 top 포인터 (non-speculative) |
-| `ssp` | commit stack의 speculative 참조 포인터 |
-| `sctr` | 동일 주소 연속 push 카운터 (speculative) |
-| `tosw` | specQueue write pointer (최신 push 위치의 다음) |
-| `tosr` | specQueue read pointer (현재 top 읽기 위치) |
-| `bos` | specQueue에서 commit이 확인된 하한선 (Bottom of Spec) |
+| `nsp` | Current top pointer of the commit stack (non-speculative) |
+| `ssp` | Speculative reference pointer in commit stack |
+| `sctr` | Same address consecutive push counter (speculative) |
+| `tosw` | specQueue write pointer (next to latest push position) |
+| `tosr` | specQueue read pointer (current top read position) |
+| `bos` | Lower limit of confirmed commits in specQueue (Bottom of Spec) |
 
 ---
 
-## 5. Ras 모듈 인터페이스 (상위)
+## 5. Ras module interface (parent)
 
 ```scala
 // Source: Ras.scala:44-51
@@ -106,23 +106,23 @@ val redirectMeta: RasRedirectMeta = Output(new RasRedirectMeta)
 val commitMeta:   RasCommitMeta   = Output(new RasCommitMeta)
 ```
 
-| 신호명 | 방향 | 타이밍 | 설명 |
+| signal name | direction | Timing | Description |
 |---|---|---|---|
-| `specIn.valid` | Input | `s3_fire` | push/pop 트리거 |
-| `specIn.bits.attribute.isCall` | Input | S3 | push 여부 |
-| `specIn.bits.attribute.isReturn` | Input | S3 | pop 여부 |
-| `specIn.bits.cfiPosition` | Input | S3 | fetch block 내 CFI offset |
-| `specIn.bits.startPc` | Input | S3 | fetch block 시작 PC |
-| `topRetAddr` | Output | S3 | 현재 top return 주소 (`timingTop.retAddr`) |
-| `redirectMeta` | Output | S3 | FTQ 저장용 checkpoint (`ssp,sctr,tosw,tosr,nos,topRetAddr`) |
-| `commitMeta` | Output | S3 | FTQ 저장용 commit meta (`ssp,tosw`) |
-| `redirect.valid` | Input | — | mispredict 복구 트리거 |
-| `redirect.bits.meta.ras` | Input | — | 복원할 checkpoint |
-| `commit.valid` | Input | — | commit 확정 |
+| `specIn.valid` | Input | `s3_fire` | push/pop trigger |
+| `specIn.bits.attribute.isCall` | Input | S3 | push or not |
+| `specIn.bits.attribute.isReturn` | Input | S3 | pop or not |
+| `specIn.bits.cfiPosition` | Input | S3 | CFI offset in fetch block |
+| `specIn.bits.startPc` | Input | S3 | start block fetch PC |
+| `topRetAddr` | Output | S3 | Current top return address (`timingTop.retAddr`) |
+| `redirectMeta` | Output | S3 | checkpoint for FTQ storage (`ssp,sctr,tosw,tosr,nos,topRetAddr`) |
+| `commitMeta` | Output | S3 | commit meta for FTQ storage (`ssp,tosw`) |
+| `redirect.valid` | Input | — | mispredict recovery trigger |
+| `redirect.bits.meta.ras` | Input | — | checkpoint to restore |
+| `commit.valid` | Input | — | commit confirmation |
 
 ---
 
-## 6. Push 동작 (Speculative)
+## 6. Push operation (Speculative)
 
 ```scala
 // Source: Ras.scala:59-74
@@ -133,14 +133,14 @@ private val specPushAddr = specAlignPc + (specIn.cfiPosition << 1.U).asUInt + 2.
 stack.spec.pushValid := specPush && !stackNearOverflow
 ```
 
-**주소 계산**: `(startPc & alignMask) + (cfiPosition * 2) + 2`
-- `alignMask`: `FetchBlockAlignWidth` 비트 단위 정렬 마스크
-- `cfiPosition * 2`: 2바이트 단위 offset (RVC 기준)
-- `+ 2`: CALL 명령어 다음 주소 (2바이트 단위)
+**Address calculation**: `(startPc & alignMask) + (cfiPosition * 2) + 2`
+- `alignMask`: `FetchBlockAlignWidth` bitwise alignment mask
+- `cfiPosition * 2`: 2 byte unit offset (RVC standard)
+- `+ 2`: CALL instruction next address (2 byte units)
 
-**억제 조건**: `stackNearOverflow = true`이면 push 차단
+**Suppression Condition**: Block push if `stackNearOverflow = true`
 
-### RasStack.specPush 내부
+### Inside RasStack.specPush
 
 ```scala
 // Source: RasStack.scala:132-149
@@ -148,15 +148,15 @@ def specPush(retAddr, currSsp, currSctr, currTosr, currTosw, topEntry): Unit = {
   tosr := currTosw
   tosw := specPtrInc(currTosw)
   when(topEntry.retAddr === retAddr && currSctr < StackCounterMax.U) {
-    sctr := currSctr + 1.U   // 동일 주소: ctr만 증가
+sctr := currSctr + 1.U // Same address: only increment ctr
   }.otherwise {
     ssp  := ptrInc(currSsp)
-    sctr := 0.U               // 새 주소: ssp 전진 + ctr reset
+sctr := 0.U // New address: ssp advance + ctr reset
   }
 }
 ```
 
-**실제 specQueue 쓰기**:
+**Write actual specQueue**:
 ```scala
 // Source: RasStack.scala:305-313
 realPush := RegNext(io.spec.pushValid, init = false.B) || RegNext(io.redirect.valid && io.redirect.isCall, ...)
@@ -165,13 +165,13 @@ when(realPush) {
   specNos(realWriteAddr.value)   := realNos
 }
 ```
-- 포인터 업데이트: **즉각** (push 이벤트 cycle에)
-- specQueue 메모리 쓰기: **1 cycle 지연** (`RegNext`)
-- 지연 기간: `writeBypassEntry/writeBypassValid`로 bypass
+- Pointer update: **immediately** (in push event cycle)
+- specQueue memory write: **1 cycle delay** (`RegNext`)
+- Delay period: bypass to `writeBypassEntry/writeBypassValid`
 
 ---
 
-## 7. Pop 동작 (Speculative)
+## 7. Pop operation (Speculative)
 
 ```scala
 // Source: Ras.scala:66,72
@@ -179,49 +179,49 @@ private val specPop = io.specIn.valid && io.specIn.bits.attribute.isReturn
 stack.spec.popValid := specPop && !stackNearOverflow
 ```
 
-**억제 조건**: `stackNearOverflow = true`이면 pop 차단
+**Suppression condition**: Block pop if `stackNearOverflow = true`
 
-### RasStack.specPop 내부
+### Inside RasStack.specPop
 
 ```scala
 // Source: RasStack.scala:151-169
 def specPop(currSsp, currSctr, currTosr, currTosw, currTopNos): Unit = {
   when(tosrInRange(currTosr, currTosw)) {
-    tosr := currTopNos   // specQueue 내 엔트리 → NOS로 이동
+tosr := currTopNos // Entry in specQueue → Move to NOS
   }
   when(currSctr > 0.U) {
-    sctr := currSctr - 1.U     // 카운터만 감소
+sctr := currSctr - 1.U // Decrement only the counter
   }.elsewhen(tosrInRange(currTopNos, currTosw)) {
     ssp  := ptrDec(currSsp)
-    sctr := specQueue(currTopNos.value).ctr   // in-flight 데이터 사용
+sctr := specQueue(currTopNos.value).ctr // Use in-flight data
   }.otherwise {
     ssp  := ptrDec(currSsp)
-    sctr := getCommitTop(ptrDec(currSsp)).ctr  // commit 데이터 fallback
+sctr := getCommitTop(ptrDec(currSsp)).ctr // commit data fallback
   }
 }
 ```
 
 ---
 
-## 8. timingTop: 출력 주소 계산
+## 8. timingTop: Calculate output address
 
 ```scala
 // Source: RasStack.scala:220-287
 private val timingTop = RegInit(0.U.asTypeOf(new RasEntry))
 ```
 
-`timingTop`은 **다음 cycle에 필요한 top을 미리 계산**하는 레지스터.
-매 cycle 아래 우선순위로 업데이트:
+`timingTop` is a register that **pre-calculates the top required for the next cycle**.
+Updates every cycle with the following priorities:
 
-| 조건 | `timingTop` 업데이트 값 |
+| Conditions | `timingTop` update value |
 |---|---|
-| `writeBypassValidWire && (redirect.isCall || spec.pushValid)` | `writeEntry` (방금 push된 엔트리) |
+| `writeBypassValidWire && (redirect.isCall || spec.pushValid)` | `writeEntry` (entry just pushed) |
 | `writeBypassValidWire` (bypass only) | `writeBypassEntry` |
-| `redirect.valid && redirect.isRet` | redirect 복원 후 NOS 기반 top 계산 |
-| `redirect.valid` (non-call/ret) | redirect meta 기반 top |
-| `spec.popValid` | NOS 기반 다음 top 계산 |
+| `redirect.valid && redirect.isRet` | NOS-based top calculation after redirect restore |
+| `redirect.valid` (non-call/ret) | redirect meta based top |
+| `spec.popValid` | NOS-based next top calculation |
 | `realPush` | `realWriteEntry` |
-| otherwise | 현재 포인터 기반 `getTop()` |
+| otherwise | Current pointer-based `getTop()` |
 
 ```scala
 // Source: RasStack.scala:323
@@ -232,24 +232,24 @@ io.topRetAddr := stack.spec.popAddr
 
 ---
 
-## 9. Redirect/복구 동작
+## 9. Redirect/recovery operation
 
 ```scala
 // Source: Ras.scala:93-104
-private val redirect = RegNextWithEnable(io.redirect)  // 1 cycle 지연
+private val redirect = RegNextWithEnable(io.redirect) // 1 cycle delay
 stack.redirect.valid := redirect.valid && (isBefore(redirectTOSW, stackTOSW) || !stackNearOverflow)
 stack.redirect.meta  := redirect.bits.meta.ras
 stack.redirect.callAddr := redirect.bits.cfiPc + 2.U
 ```
 
-**1. redirect 신호 지연**: `RegNextWithEnable` → 1 cycle 후 RasStack에 전달
-**2. 처리 조건**: `isBefore(redirectTOSW, stackTOSW) || !stackNearOverflow`
-   - overflow 상태이고 redirectTOSW >= stackTOSW이면 **처리 스킵** → 이슈 RAS-002
+**1. redirect signal delay**: `RegNextWithEnable` → delivered to RasStack after 1 cycle
+**2. Processing condition**: `isBefore(redirectTOSW, stackTOSW) || !stackNearOverflow`
+- If it is overflow and redirectTOSW >= stackTOSW, **processing is skipped** → Issue RAS-002
 
 ```scala
 // Source: RasStack.scala:387-412
 when(io.redirect.valid) {
-  tosr := io.redirect.meta.tosr    // 포인터 일괄 복원
+tosr := io.redirect.meta.tosr // Batch restore of pointers
   tosw := io.redirect.meta.tosw
   ssp  := io.redirect.meta.ssp
   sctr := io.redirect.meta.sctr
@@ -259,34 +259,34 @@ when(io.redirect.valid) {
 }
 ```
 
-**복구 순서**:
-1. checkpoint 포인터 복원 (`tosr, tosw, ssp, sctr`)
-2. redirect가 CALL이면: re-push (`callAddr = cfiPc + 2`)
-3. redirect가 RET이면: re-pop
-4. `writeBypass` 갱신
+**Recovery Sequence**:
+1. Restore checkpoint pointer (`tosr, tosw, ssp, sctr`)
+2. If redirect is CALL: re-push (`callAddr = cfiPc + 2`)
+3. If redirect is RET: re-pop
+4. `writeBypass` Update
 
 ---
 
-## 10. Commit 동작
+## 10. Commit operation
 
 ```scala
 // Source: Ras.scala:106-114
-private val commitValid = RegNext(io.commit.valid, init = false.B)  // 1 cycle 지연
+private val commitValid = RegNext(io.commit.valid, init = false.B) // 1 cycle delay
 private val commitInfo  = RegEnable(io.commit.bits, io.commit.valid)
 stack.commit.valid     := commitValid
 stack.commit.pushValid := commitValid && commitInfo.attribute.isCall
 stack.commit.popValid  := commitValid && commitInfo.attribute.isReturn
-stack.commit.pushAddr  := DontCare  // ← 실제 주소는 RasStack 내부에서 specQueue 조회
+stack.commit.pushAddr := DontCare // ← Look up specQueue inside RasStack for actual address
 stack.commit.metaTosw  := commitInfo.meta.ras.tosw
 stack.commit.metaSsp   := commitInfo.meta.ras.ssp
 ```
 
-**commit push 경로** (RasStack.scala:352-374):
+**commit push path** (RasStack.scala:352-374):
 ```scala
-private val commitPushAddr = specQueue(io.commit.metaTosw.value).retAddr  // specQueue에서 주소 조회
+private val commitPushAddr = specQueue(io.commit.metaTosw.value).retAddr // Look up address in specQueue
 when(io.commit.pushValid) {
   when(commitTop.ctr < StackCounterMax.U && commitTop.retAddr === commitPushAddr) {
-    commitStack(nspUpdate).ctr := commitTop.ctr + 1.U  // ctr 압축
+commitStack(nspUpdate).ctr := commitTop.ctr + 1.U // compress ctr
   }.otherwise {
     nsp := ptrInc(nspUpdate)
     commitStack(ptrInc(nspUpdate)).retAddr := commitPushAddr
@@ -295,7 +295,7 @@ when(io.commit.pushValid) {
 }
 ```
 
-**commit pop 경로** (RasStack.scala:333-350):
+**commit pop path** (RasStack.scala:333-350):
 ```scala
 when(io.commit.popValid) {
   when(commitTop.ctr > 0.U) {
@@ -306,9 +306,9 @@ when(io.commit.popValid) {
 }
 ```
 
-**nsp 보정**:
-- `io.commit.metaSsp =/= nsp` 시 강제로 `nsp := metaSsp` (오류 누적 방지)
-- XSError assertion은 주석 처리됨 (이슈 FRAS-003)
+**nsp correction**:
+- Force `nsp := metaSsp` when `io.commit.metaSsp =/= nsp` (prevents error accumulation)
+- XSError assertion commented out (issue FRAS-003)
 
 ---
 
@@ -323,13 +323,13 @@ when(distanceBetween(tosw, bos) > (SpecQueueSize - 2).U) {
 }
 ```
 
-- `tosw`와 `bos` 간 거리가 `SpecQueueSize - 2 = 30`을 초과하면 overflow 상태
-- **push 차단 + pop 차단** 동시 발생 (Ras.scala:71-72)
-- redirect 억제 가능성 (Ras.scala:99)
+- If the distance between `tosw` and `bos` exceeds `SpecQueueSize - 2 = 30`, it is in an overflow state.
+- **push blocking + pop blocking** occurs simultaneously (Ras.scala:71-72)
+- Possibility to suppress redirect (Ras.scala:99)
 
 ---
 
-## 12. bos 업데이트
+## 12.bos update
 
 ```scala
 // Source: RasStack.scala:376-380
@@ -340,13 +340,13 @@ when(io.commit.pushValid) {
 }
 ```
 
-- commit push 시: `bos := metaTosw`
-- commit valid이지만 push는 아닌데 `distanceBetween > 2`이면: `bos := metaTosw - 1`
-- FIXME 주석 처리된 XSError 있음 (이슈 FRAS-005)
+- When commit push: `bos := metaTosw`
+- If the commit is valid but not push but `distanceBetween > 2`: `bos := metaTosw - 1`
+- FIXME annotated XSError (issue FRAS-005)
 
 ---
 
-## 13. Checkpoint (FTQ 저장 정보)
+## 13. Checkpoint (FTQ storage information)
 
 ### redirectMeta (RasRedirectMeta)
 
@@ -360,34 +360,34 @@ class RasInternalMeta {
   val nos:  RasPtr // next-of-stack pointer
 }
 class RasRedirectMeta extends RasInternalMeta {
-  val topRetAddr: PrunedAddr  // 현재 top return 주소 (= timingTop at S3)
+val topRetAddr: PrunedAddr // current top return address (= timingTop at S3)
 }
 ```
 
-| 필드 | 용도 |
+| field | Use |
 |---|---|
-| `ssp` | redirect 시 committed stack pointer 복원 |
-| `sctr` | redirect 시 카운터 복원 |
-| `tosw` | redirect 시 write pointer 복원; commit 시 specQueue 주소 조회 |
-| `tosr` | redirect 시 read pointer 복원 |
-| `nos` | redirect pop 시 다음 top 계산 |
-| `topRetAddr` | 저장되나 사용 여부 미확인 |
+| `ssp` | Restoring committed stack pointer when redirecting |
+| `sctr` | Restore counters on redirect |
+| `tosw` | Restore write pointer when redirecting; Check specQueue address when commit |
+| `tosr` | Restore read pointer when redirecting |
+| `nos` | Calculate next top when redirect pop |
+| `topRetAddr` | Saved but not confirmed for use |
 
 ### commitMeta (RasCommitMeta)
 
 ```scala
 // Source: Bundles.scala:80-83
 class RasCommitMeta {
-  val ssp:  UInt   // commit 시 nsp 보정용
-  val tosw: RasPtr // specQueue 주소 조회용
+val ssp: UInt // for nsp correction when committing
+val tosw: RasPtr // For specQueue address lookup
 }
 ```
 
 ---
 
-## 14. writeBypass 메커니즘
+## 14. writeBypass mechanism
 
-specQueue 쓰기는 1 cycle 지연되므로, push 직후 다음 cycle 읽기를 위한 bypass가 필요:
+SpecQueue writing is delayed by 1 cycle, so a bypass is needed to read the next cycle immediately after push:
 
 ```scala
 // Source: RasStack.scala:81-85
@@ -396,138 +396,138 @@ private val writeBypassNos   = Reg(new RasPtr)
 private val writeBypassValid = RegInit(0.B)
 ```
 
-**활성화/비활성화**:
-- push 또는 redirect+call → `writeBypassValid = true`, `writeBypassEntry = writeEntry`
-- redirect (non-call) → `writeBypassValid = false` (클리어)
-- `spec.fire`이지만 push가 아니면 → `writeBypassValid = false`
+**Enable/Disable**:
+- push or redirect+call → `writeBypassValid = true`, `writeBypassEntry = writeEntry`
+- redirect (non-call) → `writeBypassValid = false` (clear)
+- `spec.fire` but not push → `writeBypassValid = false`
 
-**사용**:
-- `getTop()`: `allowBypass=true`이면 `writeBypassValid` 시 bypass 우선 사용
-- `timingTop` 계산에서 `writeBypassValidWire` 기반 최우선 처리
+**use**:
+- `getTop()`: If `allowBypass=true`, bypass is used first when `writeBypassValid`
+- Priority processing based on `writeBypassValidWire` in `timingTop` calculations
 
 ---
 
-## 15. 이슈 목록
+## 15. Issue list
 
 ### FRAS-001
-- **심각도**: `Medium`
-- **증상**: `stackNearOverflow=true` 시 push와 pop이 모두 억제됨
-- **근거**:
+- **Severity**: `Medium`
+- **Symptom**: Both push and pop are suppressed during `stackNearOverflow=true`
+- **reason**:
   ```scala
   // Ras.scala:71-72
   stack.spec.pushValid := specPush && !stackNearOverflow
   stack.spec.popValid  := specPop && !stackNearOverflow
   ```
-- **개선 제안**: overflow 시에도 pop은 허용하거나 순환 덮어쓰기 방식 고려
+- **Improvement suggestion**: Allow pop even when overflowing or consider circular overwriting method
 
 ### FRAS-002
-- **심각도**: `High`
-- **증상**: `stackNearOverflow=true` + `redirectTOSW >= stackTOSW` → redirect 처리 스킵
-- **근거**:
+- **Severity**: `High`
+- **Symptom**: `stackNearOverflow=true` + `redirectTOSW >= stackTOSW` → Skip redirect processing
+- **reason**:
   ```scala
   // Ras.scala:99
   stack.redirect.valid := redirect.valid && (isBefore(redirectTOSW, stackTOSW) || !stackNearOverflow)
   ```
-- **개선 제안**: overflow 시에도 redirect는 항상 허용하거나, overflow 진입 시 즉시 RAS reset 고려
+- **Improvement suggestion**: Always allow redirect even in overflow, or consider RAS reset immediately when overflow occurs.
 
 ### FRAS-003
-- **심각도**: `Medium`
-- **증상**: commit push 주소가 `DontCare`로 전달되어 RasStack이 specQueue에서 직접 조회. specQueue 슬롯이 32를 초과하여 덮어쓰이면 잘못된 주소 commit 가능
-- **근거**:
+- **Severity**: `Medium`
+- **Symptom**: The commit push address is sent to `DontCare` and RasStack looks it up directly in the specQueue. If specQueue slots exceed 32 and are overwritten, incorrect address commit may occur.
+- **reason**:
   ```scala
   // Ras.scala:108
   private val commitPushAddr = DontCare
   // RasStack.scala:352
   private val commitPushAddr = specQueue(io.commit.metaTosw.value).retAddr
   ```
-- **개선 제안**: FTQ에 실제 push 주소를 직접 저장하여 specQueue 의존성 제거
+- **Improvement suggestion**: Remove specQueue dependency by directly storing actual push address in FTQ.
 
 ### FRAS-004
-- **심각도**: `Info`
-- **증상**: nsp/ssp 불일치 및 commit/spec 주소 불일치 assertion 주석 처리됨
-- **근거**:
+- **Severity**: `Info`
+- **Symptom**: nsp/ssp mismatch and commit/spec address mismatch assertions commented out.
+- **reason**:
   ```scala
   // RasStack.scala:349,371-373
   // XSError(io.commit.metaSsp =/= nsp, "nsp mismatch with expected ssp")
   // XSError(io.commit.pushAddr =/= commitPushAddr, "addr from commit mismatch with addr from spec")
   ```
-- **개선 제안**: 주석 처리 원인 파악 및 조건부 assertion으로 재활성화
+- **Improvement suggestion**: Identify cause of annotation processing and reactivate with conditional assertion
 
 ### FRAS-005
-- **심각도**: `Low`
-- **증상**: `bos` 업데이트 조건(`distanceBetween > 2`)이 예상치 않게 발생하여 XSError 주석 처리
-- **근거**:
+- **Severity**: `Low`
+- **Symptom**: `bos` update condition (`distanceBetween > 2`) occurs unexpectedly, commenting out XSError
+- **reason**:
   ```scala
   // RasStack.scala:381-385
   // FIXME: Currently this assertion fails. Fix or reconsider it in the future.
   // XSError(io.commit.valid && (distanceBetween(io.commit.metaTosw, bos) > 2.U), ...)
   ```
-- **개선 제안**: bos 갱신 정책 재검토 및 의도적 조건인지 버그인지 명확화
+- **Improvement Suggestion**: Reexamine the BOS renewal policy and clarify whether it is an intentional condition or a bug.
 
 ### FRAS-006
-- **심각도**: `High`
-- **증상**: `PopAndPush (0b11)` (jalr rs1=x1/x5 && rd=x1/x5, rs1≠rd) 명령어 처리 시 push도 pop도 미발생
-- **근거**:
+- **Severity**: `High`
+- **Symptom**: Neither push nor pop occurs when processing the `PopAndPush (0b11)` (jalr rs1=x1/x5 && rd=x1/x5, rs1≠rd) command.
+- **reason**:
   ```scala
   // Ras.scala:65-66
   private val specPush = io.specIn.valid && io.specIn.bits.attribute.isCall      // isCall = Push(0b10) only
   private val specPop  = io.specIn.valid && io.specIn.bits.attribute.isReturn    // isReturn = Pop(0b01) only
-  // PopAndPush(0b11)은 isCall=false, isReturn=false → 둘 다 처리 안 됨
+// PopAndPush(0b11) isCall=false, isReturn=false → Neither is processed
   ```
-- **개선 제안**: `hasPush`/`hasPop` 비트 필드 사용:
+- **Improvement suggestion**: Use `hasPush`/`hasPop` bit fields:
   ```scala
   private val specPush = io.specIn.valid && io.specIn.bits.attribute.hasPush
   private val specPop  = io.specIn.valid && io.specIn.bits.attribute.hasPop
   ```
 
 ### FRAS-007
-- **심각도**: `Medium`
-- **증상**: 동일 fetch block에 call+ret 등 다중 CFI가 있어도 첫 번째 taken 분기 하나만 처리
-- **근거**: `io.specIn.valid = s3_fire` 단일 valid, S3 prediction은 하나의 분기만 표현
-- **개선 제안**: fetch block 내 모든 call/ret을 순서대로 처리하는 다중 이벤트 큐 도입
+- **Severity**: `Medium`
+- **Symptom**: Even if there are multiple CFIs such as call+ret in the same fetch block, only the first taken branch is processed.
+- **Rationale**: `io.specIn.valid = s3_fire` single valid, S3 prediction expresses only one branch
+- **Improvement suggestion**: Introducing multiple event queues that process all calls/rets within a fetch block in order.
 
 ---
 
 ## 16. Input-to-output latency
 
-| 동작 | 입력 트리거 | 출력 유효 시점 | latency |
+| Action | input trigger | Output validity period | latency |
 |---|---|---|---|
-| push (speculative) | `s3_fire` (Ras.scala) | 다음 S3 cycle (`timingTop` 레지스터) | 1 cycle |
-| pop (speculative) | `s3_fire` (Ras.scala) | 다음 S3 cycle (`timingTop` 레지스터) | 1 cycle |
-| `topRetAddr` 출력 | 이전 S3 push/pop | 현재 S3 (registered `timingTop`) | 0 (combinational from register) |
-| redirect 복구 | `io.redirect.valid` | redirect+2 cycle (`RegNextWithEnable` + 포인터 복원) | 2 cycle |
-| commit 처리 | `io.commit.valid` | commit+1 cycle (`RegNext` 지연) | 1 cycle |
+| push (speculative) | `s3_fire` (Ras.scala) | Next S3 cycle (`timingTop` register) | 1 cycle |
+| pop (speculative) | `s3_fire` (Ras.scala) | Next S3 cycle (`timingTop` register) | 1 cycle |
+| `topRetAddr` output | Previous S3 push/pop | Current S3 (registered `timingTop`) | 0 (combinational from register) |
+| redirect recovery | `io.redirect.valid` | redirect+2 cycle (`RegNextWithEnable` + pointer restoration) | 2 cycle |
+| commit processing | `io.commit.valid` | commit+1 cycle (`RegNext` delay) | 1 cycle |
 
 ---
 
-## 17. 검증 체크리스트
+## 17. Verification Checklist
 
-### 기본 동작
-- [ ] call push → 다음 cycle `topRetAddr == pushAddr` 확인
-- [ ] call push → ret pop → `topRetAddr` 복원 확인
-- [ ] overflow(SpecQueueSize=32 초과) 시 `specNearOverflowed=true`, push/pop 억제 확인
-- [ ] PopAndPush 명령어 처리 (현재 미처리, FRAS-006)
+### Default behavior
+- [ ] call push → check next cycle `topRetAddr == pushAddr`
+- [ ] call push → ret pop → confirm restoration of `topRetAddr`
+- [ ] Check `specNearOverflowed=true`, push/pop suppression when overflow (SpecQueueSize=32 exceeded)
+- [ ] PopAndPush instruction handling (currently unhandled, FRAS-006)
 
-### Redirect 복구
-- [ ] mispredict redirect 시 checkpoint 포인터 복원 정확성 확인
-- [ ] redirect 처리 2-cycle latency 동안 예측 결과 확인
-- [ ] overflow 중 redirect → `stack.redirect.valid` 억제 조건 검증 (FRAS-002)
-- [ ] redirect isCall → re-push 주소 = `cfiPc + 2` 확인
+### Redirect recovery
+- [ ] Verify checkpoint-pointer restoration accuracy on mispredict redirect
+- [ ] Verify prediction behavior during the 2-cycle redirect handling latency
+- [ ] Verify the suppression condition of `stack.redirect.valid` during overflow redirect (FRAS-002)
+- [ ] Verify redirect `isCall` re-push address equals `cfiPc + 2`
 
-### Commit 정확성
-- [ ] commit push 시 specQueue 슬롯 32 미만 범위에서 주소 정확성 확인
-- [ ] specQueue 슬롯 32 초과 후 commit push 시 잘못된 주소 가능성 검증 (FRAS-003)
-- [ ] nsp/ssp mismatch 시 강제 보정 동작 확인
+### Commit accuracy
+- [ ] Verify address accuracy when commit push uses specQueue slots below 32
+- [ ] Verify potential wrong-address issue when commit push occurs after specQueue exceeds slot 32 (FRAS-003)
+- [ ] Verify forced-correction behavior on `nsp/ssp` mismatch
 
 ### Overflow
-- [ ] overflow 상태 진입/해제 조건 검증 (`tosw - bos > 30`)
-- [ ] overflow 중 redirect 억제 → 이후 예측 오류 발생 여부 확인
+- [ ] Verification of overflow state entry/release conditions (`tosw - bos > 30`)
+- [ ] Verify whether suppressing redirect during overflow leads to subsequent prediction errors
 
 ### writeBypass
-- [ ] push 직후 다음 cycle에 `timingTop`이 push된 주소를 정확히 반영하는지 확인
-- [ ] redirect+call 시 writeBypass 업데이트 및 다음 topRetAddr 확인
+- [ ] Check whether `timingTop` accurately reflects the pushed address in the next cycle immediately after push.
+- [ ] When redirect+call, writeBypass is updated and next topRetAddr is checked.
 
 ---
 
-*분석 기준 파일: `src/main/scala/xiangshan/frontend/bpu/ras/Ras.scala`, `RasStack.scala`, `Bundles.scala`, `Parameters.scala`*
-*코드 커밋: `bfbb21862` (branch: `kunminghu-v3`)*
+*Analysis standard files: `src/main/scala/xiangshan/frontend/bpu/ras/Ras.scala`, `RasStack.scala`, `Bundles.scala`, `Parameters.scala`*
+*Code commit: `bfbb21862` (branch: `kunminghu-v3`)*
