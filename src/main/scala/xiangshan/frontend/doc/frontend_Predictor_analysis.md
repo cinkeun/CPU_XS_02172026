@@ -365,6 +365,139 @@ s0_startPc 최우선: redirect.bits.target
 
 ---
 
+### 9.1 Conditional Branch 예측 (mBTB + TAGE + SC)
+
+```
+=== [Case 1: Conditional Branch] mBTB + TAGE + SC ===
+// 핵심: direction(taken/not-taken)만 결정. target은 mBTB 고정.
+
+// --- S0: SRAM read requests (동시 발송) ---
+mbtb.readReq(alignBankIdx=PC[5], internalBankIdx=PC[7:6], setIdx=PC[15:8])
+for t in tage.tables[0..7]:
+  t.readReq(setIdx = fold(PC XOR pathHist XOR globalHist, t.histLen),
+            tag    = fold(PC XOR globalHist, TagWidth))
+for t in sc.tables:  // path-based + global-based
+  t.readReq(setIdx = fold(pathHist XOR PC, t.histLen))
+
+// --- S1: SRAM responses arrive ---
+mbtb_s1_rawEntries = mbtb.readResp()     // tag compare는 S2에서
+tage_s1_rawResps   = tage.tables.readResp()
+sc_s1_rawResps     = sc.tables.readResp()
+
+// --- S2: tag compare + direction 결정 ---
+
+// [mBTB] tag compare
+for each way i:
+  mbtb_hit[i]   = entry[i].valid && entry[i].tag == PC[31:16]
+  mbtb_taken[i] = mbtb.counterSram[i].isPositive  // 2-bit saturating counter
+
+// [TAGE] provider 선택 (가장 긴 history를 가진 hit table)
+for each way i:  // = mBTB result slot 기준
+  hitTableMask    = [tage.tables[j].tag == computedTag[j] for j in 0..7]
+  providerTableOH = getLongestHistTableOH(hitTableMask)
+  provider        = tage.tables[providerTableOH]
+  hasAlt          = any hit besides provider
+  alt             = tage.tables[altTableOH]        // second longest hit
+
+  useProvider  = hasProvider && !(useAltOnNa && provider.takenCtr.isWeak)
+  providerPred = provider.takenCtr.isPositive      // MSB of 2-bit ctr
+  altPred      = alt.takenCtr.isPositive
+
+// [SC] adaptive-threshold confidence check
+for each way i:
+  percsum[j] = sc.tables[j].ctr * 2 + 1           // getPercsum (signed partial sum)
+  scSum      = sum(percsum for all SC tables)
+
+  // TAGE provider confidence에 따라 threshold 조정
+  tageConfHigh = provider.takenCtr.isSaturate      // 강한 확신 (both ends)
+  tageConfMid  = provider.takenCtr.isMid           // 중간
+  // tageConfLow  = otherwise
+
+  adaptiveThres = scThreshold >> (1 if confHigh else 2 if confMid else 3)
+
+  scUsed[i]  = mbtb_hit[i] && hasProvider && aboveThreshold(|scSum|, adaptiveThres)
+  scTaken[i] = scSum >= 0                          // 부호로 방향 결정
+
+// [최종 direction] 우선순위: SC > TAGE provider > TAGE alt > mBTB counter
+for each way i:
+  condTaken[i] = mbtb_hit[i] && isConditional[i] &&
+    MuxCase(mbtb_taken[i],         // 기본값: mBTB 2-bit counter
+      scUsed[i]   → scTaken[i],   // SC 활성: scSum 부호 사용
+      useProvider → providerPred, // TAGE provider hit
+      hasAlt      → altPred       // TAGE alt hit
+    )
+
+// --- S3: first taken 선택 + target + override ---
+takenMask[i]     = condTaken[i] || jumpTaken[i]   // jumpTaken = isDirect||isIndirect
+firstTakenOH     = CompareMatrix(positions).getLeastElementOH(takenMask)
+firstTakenBranch = Mux1H(firstTakenOH, s3_mbtbResult)
+
+s3_prediction.taken       = takenMask.reduce(||)
+s3_prediction.cfiPosition = firstTakenBranch.bits.cfiPosition
+s3_prediction.target      = reconstruct(PC, firstTakenBranch.bits.targetLowerBits,
+                                             firstTakenBranch.bits.targetCarry)
+// conditional branch target은 mBTB에서만 — TAGE/SC는 direction만 보정
+
+s3_override = s3_valid && (s3_prediction != s3_s1Prediction)
+```
+
+---
+
+### 9.2 Indirect Jump 예측 (mBTB + ITTage, non-return)
+
+```
+=== [Case 2: Indirect Jump] mBTB + ITTage (isReturn=false) ===
+// 핵심: direction은 항상 taken. target 정확도만이 문제.
+
+// --- S0: SRAM read requests ---
+mbtb.readReq(alignBankIdx=PC[5], internalBankIdx=PC[7:6], setIdx=PC[15:8])
+// ITTage는 S0에서 읽지 않음 (power opt: s1_isIndirect 대기)
+// ※ 이론상 S0 speculative read → S2에서 prediction 완성 가능하지만 현재 미채택
+
+// --- S1: mBTB SRAM resp + ITTage read req ---
+mbtb_s1_rawEntries = mbtb.readResp()
+s1_isIndirect      = firstTakenBranch.attribute.needIttage  // abtb/ubtb s1 결과 기반
+
+if s1_isIndirect:
+  for t in ittage.tables:
+    t.readReq(setIdx = fold(hist XOR PC, t.histLen),
+              tag    = fold(hist XOR PC, TagWidth))
+
+// --- S2: mBTB tag compare + ITTage SRAM resp + provider 선택 ---
+
+// [mBTB] tag compare
+for each way i:
+  mbtb_hit[i]    = entry[i].valid && entry[i].tag == PC[31:16]
+  mbtb_target[i] = reconstruct(PC, entry[i].targetLowerBits, entry[i].targetCarry)
+  jumpTaken[i]   = mbtb_hit[i] && isIndirect   // 항상 taken (direction 예측 불필요)
+
+// [ITTage] provider 선택 (가장 긴 history를 가진 hit table)
+ittage_hitMask    = [ittage.tables[j].tag == computedTag[j] for j in tables]
+ittage_providerOH = getLongestHistTableOH(ittage_hitMask)
+ittage_provided   = any(ittage_hitMask)
+ittage_target     = ittage.tables[ittage_providerOH].target  // 전체 target 저장
+
+// s2_ittageTarget 래치 → S3에서 io.prediction.target으로 출력
+
+// --- S3: target 선택 + override ---
+firstTakenBranch = Mux1H(firstTakenOH, s3_mbtbResult)
+
+// 우선순위: RAS(isReturn) > ITTage(needIttage && hit) > mBTB target
+s3_useRas    = firstTakenBranch.bits.attribute.isReturn
+s3_useIttage = firstTakenBranch.bits.attribute.needIttage && ittage.prediction.hit
+
+s3_prediction.taken  = true   // indirect는 항상 taken
+s3_prediction.target = MuxCase(firstTakenBranch.bits.target,  // fallback: mBTB
+  (s3_taken && s3_useRas)    → ras.topRetAddr,               // return: RAS
+  (s3_taken && s3_useIttage) → ittage.prediction.target      // indirect: ITTage
+)
+// ※ isReturn 시에도 mBTB entry 존재 (attribute=Return) → target은 RAS로 override
+
+s3_override = s3_valid && (s3_prediction != s3_s1Prediction)
+```
+
+---
+
 ## 10. Notes / Assumptions
 
 - **동일 PC 입력**: 모든 predictor가 `s0_startPc`를 공유 — `Bpu.scala:192 p.io.startPc := s0_startPc`
