@@ -74,12 +74,12 @@ The second argument of `TableInfos` is `HistoryLength`.
 
 | Table | NumSets | HistoryLength (PHR bits) | HistBitsInTag | TagWidth | Taken branches covered |
 |-------|---------|--------------------------|---------------|----------|------------------------|
-| Table-0 | 512 | **6**  | 6  | 15 | 6 / 2 = **3** |
-| Table-1 | 512 | **12** | 6  | 15 | 12 / 2 = **6** |
+| Table-0 | 512 | **9**  | 9  | 15 | 9 / 2 = **~4** |
+| Table-1 | 512 | **16** | 12 | 16 | 16 / 2 = **8** |
 
 - `HistoryLength` = number of **PHR bits** used for index/tag hashing (not branch count)
 - Taken branches covered = `HistoryLength / Shamt` (Shamt=2 bits per taken branch)
-- Maximum history length (based on currently active table): **12 PHR bits = 6 taken branches**
+- Maximum history length (based on currently active table): **16 PHR bits = 8 taken branches**
 - `HistBitsInTag` is the number of history bits reflected when creating a tag, and has a different meaning from `HistoryLength`.
 
 ```scala
@@ -407,17 +407,17 @@ def pathHash(pc: PrunedAddr, target: PrunedAddr): UInt = {
 | 업데이트 조건 | taken branch마다 PHR에 shift-in |
 | PC 기여 | `pc[9:1]` (9 bits) → 4-bit left-shift 후 사용 |
 | Target 기여 | `target[16:2]` (15 bits) |
-| PHR 전체 길이 | `nextMultipleOf(MaxHistLen + Shamt*FtqSize + FtqFullFix, 4)` — Shamt=2, FtqSize=8, FtqFullFix=4 |
+| PHR 전체 길이 | `nextMultipleOf(MaxHistLen + Shamt*FtqSize + FtqFullFix, 4)` — Shamt=2, FtqSize=64, FtqFullFix=4 |
 
 PHR은 folded form으로만 각 예측기에 전달된다. uTAGE가 받는 `foldedPathHist`는 `PhrAllFoldedHistories` 타입으로, 필요한 `(histLen, foldedLen)` 쌍마다 하나의 `PhrFoldedHistory`를 포함한다.
 
-### 실제 config 파라미터 (Configs.scala MinimalConfig)
+### Default config 파라미터 (utage/Parameters.scala)
 
 ```scala
-// Source: top/Configs.scala:123-127
+// Source: bpu/utage/Parameters.scala:25-29
 // MicroTageInfo(NumSets, HistoryLength, HistBitsInTag, TagWidth)
-new MicroTageInfo(512, 6,  6, 15),  // Table-0
-new MicroTageInfo(512, 12, 6, 15)   // Table-1
+new MicroTageInfo(512, 9,  9, 15),  // Table-0
+new MicroTageInfo(512, 16, 12, 16)  // Table-1
 ```
 
 ### Folded history 인스턴스 (테이블별)
@@ -431,8 +431,84 @@ val altTagFhInfo = FoldedHistoryInfo(histLen, min(histLen, histBitsInTag - 1))
 
 | Table | histLen | histBitsInTag | idxFh (histLen→foldedLen) | tagFh | altTagFh |
 |-------|---------|---------------|---------------------------|-------|----------|
-| Table-0 | 6 | 6 | 6→**6** (min(9,6)) | 6→**6** | 6→**5** |
-| Table-1 | 12 | 6 | 12→**9** (min(9,12)) | 12→**6** | 12→**5** |
+| Table-0 | 9 | 9 | 9→**9** (min(9,9)) | 9→**9** | 9→**8** |
+| Table-1 | 16 | 12 | 16→**9** (min(9,16)) | 16→**12** | 16→**11** |
+
+### idxFh 증분 업데이트 (PhrFoldedHistory.update)
+
+`idxFh`는 raw PHR에서 매 사이클 새로 읽어 오는 것이 아니라, 이전 `idxFh`에 증분 업데이트를 적용하여 유지한다.
+업데이트는 `bpu/history/phr/Bundles.scala`의 `PhrFoldedHistory.update()` 에 의해 수행된다.
+
+```scala
+// Source: bpu/history/phr/Bundles.scala:89, 107-148
+def needOldestBits: Boolean = info.HistoryLength > info.FoldedLength
+```
+
+#### Table-0: histLen=9, foldedLen=9 (`needOldestBits = false`)
+
+`histLen == foldedLen` → 히스토리가 절대 wrap-around하지 않으므로 단순 shift register:
+
+```
+newFoldedHist[8:0] = ((idxFh_old << 2) | shiftBits)[8:0]
+idxFh_new[8:0]     = newFoldedHist[8:0] ^ computeFoldedHash(Cat(hashHigh, 0.U(2.W)), foldedLen=9)(histLen=9)
+```
+
+- `shiftBits = pathHash[1:0]` (Shamt=2 new bits, newest branch at MSB)
+- `hashHigh = pathHash[14:2]` (13 bits): `computeFoldedHash`를 통해 9-bit XOR 마스크로 접힘
+- `computeFoldedHash(Cat(hashHigh, 00), 9)(9)`: 15-bit 값을 9-bit 청크로 XOR 접기
+
+```scala
+// Source: bpu/history/phr/Bundles.scala:138-141 (needOldestBits=false 경로)
+((foldedHist << num).asUInt | shiftBits)(info.FoldedLength - 1, 0).asUInt
+// + hashFolded:
+val hashFolded = computeFoldedHash(Cat(hashHigh, 0.U(maxUpdateNum.W)), info.FoldedLength)(info.HistoryLength)
+fh.foldedHist := newFoldedHist ^ hashFolded
+```
+
+#### Table-1: histLen=16, foldedLen=9 (`needOldestBits = true`)
+
+`histLen > foldedLen` → 가장 오래된 비트가 wrap-around하여 빠져나가므로 순환 시프트 + oldest-bit XOR-out:
+
+```
+// 1. oldest bits 계산 (phr 배열에서 직접 읽음)
+oldestBit[0] = phr[histLen-1]  = phr[15]   // 가장 오래된 비트
+oldestBit[1] = phr[histLen-2]  = phr[14]   // 두 번째로 오래된 비트
+
+// 2. XOR 단계 (shift 전)
+xored = (old foldedHist)
+      XOR (wrap-around하는 oldest bits를 해당 foldedLen 내 위치에 XOR-out)
+      XOR (shiftBits를 MSB 위치에 XOR-in)
+
+// 3. 순환 왼쪽 시프트 by 2
+newFoldedHist[8:0] = circularShiftLeft(xored, 2)
+
+// 4. hashHigh 혼합
+idxFh_new[8:0] = newFoldedHist[8:0] ^ computeFoldedHash(Cat(hashHigh, 0.U(2.W)), 9)(16)
+```
+
+- `oldestBitPosInFolded = [histLen-1 % foldedLen, histLen-2 % foldedLen] = [15%9, 14%9] = [6, 5]`
+- `oldestBitWrapAround = [15/9 > 0, 14/9 > 0] = [true, true]` → 두 oldest bit 모두 XOR-out 대상
+- `newestBitsSet`: `shiftBits[1]`을 `foldedLen-1=8` 위치, `shiftBits[0]`을 `foldedLen-2=7` 위치에 XOR-in
+
+#### 공통: `computeFoldedHash`
+
+```scala
+// Source: bpu/history/phr/Helpers.scala:65-75
+def computeFoldedHash(value: UInt, compLen: Int)(histLen: Int): UInt
+// Cat(hashHigh, 0.U(2.W)) = 15-bit 값
+// compLen = foldedLen (9)
+// histLen = Table-0: 9, Table-1: 16
+// → value[histLen-1:0]를 compLen-bit 청크로 쪼개 XOR 접기
+```
+
+#### idxFh 갱신 우선순위 (Phr.scala)
+
+```
+redirect.valid    → redirectData.foldedPhr   (raw PHR로부터 전체 재계산)
+elsewhen s3_override → s3_foldedPhrReg.update()  (증분)
+elsewhen s1_valid    → s1_foldedPhrReg.update()  (증분)
+otherwise            → s0_foldedPhrReg          (이전 사이클 유지)
+```
 
 ### computeHash 상세
 
@@ -454,25 +530,29 @@ val highTag = connectPcTag(unhashedIdx, tableId)  // tableId별 PC bit 선택
 val tag     = Cat(highTag, lowTag)[tagLen-1:0]
 ```
 
-**Table-0 index** (idxFhFoldedLen=6 < 9 → Case A, foldShift=3):
-```
-idx[8:0] = (unhashedIdx ^ Cat(000, idxFh[5:0]) ^ (idxFh[5:0] << 3))[8:0]
-```
-
-**Table-1 index** (idxFhFoldedLen=9 == 9 → Case B):
+**Table-0 index** (idxFhFoldedLen=9 == 9 → Case B, simple XOR):
 ```
 idx[8:0] = (unhashedIdx ^ idxFh[8:0])[8:0]
 ```
 
-**Tag 구성 (두 테이블 모두 tagLen=15):**
+**Table-1 index** (idxFhFoldedLen=9 == 9 → Case B, simple XOR):
 ```
+idx[8:0] = (unhashedIdx ^ idxFh[8:0])[8:0]
+```
+
+**Tag 구성:**
+```
+// Table-0: tagLen=15, histBitsInTag=9
 tag[14:0] = Cat(highTag, lowTag)[14:0]
 
-lowTag[5:0]  = (PC[38:7] ^ tagFh ^ (altTagFh << 1))[5:0]
-               ↑ history가 tag에 반영되는 부분 (aliasing 감소)
+lowTag[8:0]  = (PC[38:7] ^ tagFh[8:0] ^ (altTagFh[7:0] << 1))[8:0]   // 9 bits
+highTag      = connectPcTag(unhashedIdx, 0)  // 11 PC bits → Cat → truncated to 6
 
-highTag      = connectPcTag(unhashedIdx, tableId)
-               ↑ PC bit를 직접 선택해 tag 상위를 채움 (collision 감소)
+// Table-1: tagLen=16, histBitsInTag=12
+tag[15:0] = Cat(highTag, lowTag)[15:0]
+
+lowTag[11:0] = (PC[38:7] ^ tagFh[11:0] ^ (altTagFh[10:0] << 1))[11:0] // 12 bits
+highTag      = connectPcTag(unhashedIdx, 1)  // 10 PC bits → Cat → truncated to 4
 ```
 
 #### connectPcTag — tableId별 PC bit 선택
@@ -489,8 +569,8 @@ PCTagHashBitsForMediumHistory = Seq(18, 16, 14, 12, 10, 6, 5, 4, 2, 1)
 
 | Table | highTag bits | lowTag bits | tag 총 비트 |
 |-------|-------------|-------------|------------|
-| Table-0 | 11 (Short PC bits) | 6 | Cat → 17, **truncated to 15** |
-| Table-1 | 10 (Medium PC bits) | 6 | Cat → 16, **truncated to 15** |
+| Table-0 | 11 (Short PC bits) | 9 | Cat → 20, **truncated to 15** |
+| Table-1 | 10 (Medium PC bits) | 12 | Cat → 22, **truncated to 16** |
 
 ### Train path
 
@@ -509,13 +589,13 @@ private val (trainIdx, trainTag) =
 | 항목 | Table-0 | Table-1 |
 |------|---------|---------|
 | History type | PHR | PHR |
-| HistoryLength | 6 path entries | 12 path entries |
-| idxFh 폭 | 6-bit folded | 9-bit folded |
-| Index hash | double-XOR (foldShift=3) | simple XOR |
-| Tag low | PC[38:7] XOR tagFh(6b) XOR (altTagFh(5b)<<1) | 동일 구조 |
-| Tag high (PC bits) | {PC[16,14,12,10,8,7,6,5,4,3,2]} | {PC[19,17,15,13,11,7,6,5,3,2]} |
-| tagLen | 15 bits | 15 bits |
-| History bits used in tag | 6 | 6 |
+| HistoryLength (PHR bits) | **9** (~4 taken branches) | **16** (8 taken branches) |
+| idxFh 폭 | 9-bit folded | 9-bit folded |
+| Index hash | simple XOR (Case B) | simple XOR (Case B) |
+| Tag low | PC[38:7] XOR tagFh(9b) XOR (altTagFh(8b)<<1) → 9 bits | PC[38:7] XOR tagFh(12b) XOR (altTagFh(11b)<<1) → 12 bits |
+| Tag high (PC bits) | {PC[16,14,12,10,8,7,6,5,4,3,2]} (11b→6b) | {PC[19,17,15,13,11,7,6,5,3,2]} (10b→4b) |
+| tagLen | 15 bits | 16 bits |
+| History bits used in tag | 9 (histBitsInTag) | 12 (histBitsInTag) |
 | Use history for idx | Yes (PHR folded) | Yes (PHR folded) |
 
 ---

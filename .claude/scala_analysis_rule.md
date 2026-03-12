@@ -73,6 +73,12 @@
 
 > 문서에 쓰는 모든 결론(파이프라인 개수, 방향, 백프레셔 방식)은 위 단서 중 하나 이상으로 **코드 근거**를 붙여 설명한다.
 
+#### Config 기준 원칙
+
+* 파라미터 값을 인용할 때는 **반드시 각 predictor의 `Parameters.scala`에 정의된 default 값**을 기준으로 한다.
+* `top/Configs.scala`의 `MinimalConfig` 등 override 값은 별도로 명기하지 않는 한 사용하지 않는다.
+* MinimalConfig와 default가 다를 경우, default를 먼저 기술하고 필요 시 "(MinimalConfig에서는 X로 override)" 형식으로 부기한다.
+
 ---
 
 ### 0.3 분석 깊이 기준

@@ -14,19 +14,21 @@ Unlike a GHR (1-bit taken/not-taken shift register), PHR records the **hash of (
 |------|-------|
 | History unit | 1 taken branch = `pathHash(pc, target)` → 15-bit value |
 | Update condition | On taken branch only (not-taken causes no change) |
-| Physical structure | Circular buffer (`Vec[Bool]` + pointer) |
-| Consumers | uTAGE, TAGE, ITTAGE, SC path tables |
+| Physical structure | Circular buffer (`Vec[Bool]` + pointer), **532 bits** (default config) |
+| Buffer size formula | `nextMultipleOf(MaxTableHistoryLength(397) + Shamt(2)×FtqSize(64) + FtqFullFix(4), 4)` = **532** |
+| Taken branches tracked | 532 / Shamt(2) = **266 taken branches** |
+| Consumers | uTAGE (histLen≤16), TAGE (histLen≤397), ITTAGE, SC path tables |
 
 ---
 
-## Parameters (Configs.scala MinimalConfig)
+## Parameters (Default config)
 
 ```scala
 // Source: bpu/history/phr/Parameters.scala
 PhrParameters(
   Shamt          = 2,   // bits shifted in per taken branch
   PathHashWidth  = 15,  // pathHash output width
-  HistoryAlign   = 4,   // PHR length rounded to this multiple
+  HistoryAlign   = 4,   // PHR length rounded up to nearest multiple of this value (for hex readability)
 )
 // PathHashHighWidth = PathHashWidth - Shamt = 13
 ```
@@ -35,9 +37,11 @@ PhrParameters(
 // Source: frontend/FrontendParameters.scala:39-56
 def getPhrHistoryLength: Int =
   nextMultipleOf(MaxTableHistoryLength + Shamt * FtqSize + FtqFullFix, HistoryAlign)
-// MaxTableHistoryLength = max history length across TAGE, ITTAGE, SC-path tables
-// Shamt * FtqSize = 2 * 8 = 16  (slack for FTQ-full overflow)
-// FtqFullFix      = 4
+// MaxTableHistoryLength = max HistoryLength across TAGE(397), ITTAGE, SC-path tables = 397  (tage/Parameters.scala)
+// FtqSize      = 64  (ftq/FtqParameters.scala default)
+// Shamt * FtqSize = 2 * 64 = 128  (slack for up to 64 in-flight FTQ entries × 2 bits each)
+// FtqFullFix   = 4
+// → PhrHistoryLength = nextMultipleOf(397 + 128 + 4, 4) = nextMultipleOf(529, 4) = 532
 ```
 
 ---
@@ -74,7 +78,7 @@ private def getPhr(ptr: PhrPtr): UInt =
   (Cat(phr.asUInt, phr.asUInt) >> (ptr.value + 1.U))(PhrHistoryLength - 1, 0)
 ```
 
-`phrPtr` points to the current head. `getPhr(ptr)` extracts `PhrHistoryLength` bits starting at `ptr+1` — **most recent branch is at MSB**.
+`phrPtr` points to the current head. `getPhr(ptr)` extracts `PhrHistoryLength` (=**532**) bits starting at `ptr+1` — **most recent branch is at MSB**.
 
 ---
 
@@ -83,15 +87,15 @@ private def getPhr(ptr: PhrPtr): UInt =
 ```scala
 // Source: bpu/history/phr/Phr.scala:141-149
 when(updateData.taken) {
-  // write 2 new bits at ptr position
+  // write Shamt(=2) new bits at ptr position
   phr[(ptr - 0)] := shiftBits(1)   // newest bit
   phr[(ptr - 1)] := shiftBits(0)
 
-  // replace oldest bit positions (ptr+1 .. ptr+13) with hashHigh XOR saved snapshot
-  for i in 1 to PathHashHighWidth:  // 13 iterations
+  // overwrite PathHashHighWidth(=13) oldest positions with hashHigh XOR saved snapshot
+  for i in 1 to PathHashHighWidth:  // 13 iterations: ptr+1 .. ptr+13
     phr[(ptr + i)] := hashHigh(i-1) ^ phrLowBits(i-1)
 
-  phrPtr := ptr - Shamt  // advance ptr by 2 (circular)
+  phrPtr := ptr - Shamt  // advance ptr by Shamt=2 (circular, within 532-bit buffer)
 }
 ```
 
@@ -104,13 +108,14 @@ taken branch occurs
       │
       ▼
 pathHash(cfiPc, target)
-  → shiftBits[1:0]  (2 new history bits)
-  → hashHigh[14:2]  (13 bits for oldest-bit replacement + folded hash mixing)
+  → hash[14:0]  (15 bits)
+  → shiftBits = hash[1:0]   (Shamt=2 bits: new history bits)
+  → hashHigh  = hash[14:2]  (PathHashHighWidth=13 bits: oldest-bit replacement + fold)
       │
-      ├─ phr[ptr]       ← shiftBits[1]
-      ├─ phr[ptr-1]     ← shiftBits[0]
-      ├─ phr[ptr+1..13] ← hashHigh XOR phrLowBits  (wrap-around oldest bit handling)
-      └─ phrPtr -= 2
+      ├─ phr[ptr]          ← shiftBits[1]          (newest)
+      ├─ phr[ptr-1]        ← shiftBits[0]
+      ├─ phr[ptr+1..ptr+13] ← hashHigh XOR phrLowBits  (oldest 13 positions overwritten)
+      └─ phrPtr -= 2  (circular within 532-bit buffer)
 ```
 
 ---
@@ -225,8 +230,8 @@ def computeFoldedHist(phrValue: UInt, compLen: Int)(histLen: Int): UInt =
 
 | Step | Action |
 |------|--------|
-| **Bit generation** | `pathHash(pc, target)` → 15-bit: `shiftBits[1:0]` + `hashHigh[14:2]` |
-| **Raw PHR update** | On taken: write `shiftBits` at `phr[ptr, ptr-1]`, replace `phr[ptr+1..13]` with `hashHigh XOR old`, `ptr -= 2` |
-| **Folded update** | Incremental: circular shift + oldest-bit XOR out + newest-bit XOR in + hashHigh fold |
-| **Redirect recovery** | `getRedirectPhr(phrMeta)` → reconstruct raw → `computeFoldedHist` |
-| **Predictor supply** | `PhrAllFoldedHistories` — one `PhrFoldedHistory` per `(histLen, foldedLen)` pair |
+| **Bit generation** | `pathHash(pc, target)` → 15-bit: `shiftBits[1:0]` (Shamt=2) + `hashHigh[14:2]` (PathHashHighWidth=13) |
+| **Raw PHR update** | On taken: write `shiftBits` at `phr[ptr, ptr-1]`, replace `phr[ptr+1..ptr+13]` with `hashHigh XOR phrLowBits`, `ptr -= 2` (within 532-bit buffer) |
+| **Folded update** | Incremental: circular shift(2) + oldest-bit XOR out + newest-bit XOR in + hashHigh fold |
+| **Redirect recovery** | `getRedirectPhr(phrMeta)` → reconstruct 532-bit raw → `computeFoldedHist` for each (histLen, foldedLen) |
+| **Predictor supply** | `PhrAllFoldedHistories` — one `PhrFoldedHistory` per (histLen, foldedLen) pair; histLen up to 397 (TAGE) |
