@@ -89,26 +89,115 @@ private val takenCounter = RegInit(
 
 ## 1.3 BTB memory entry description
 
+### AheadBtbEntry (SRAM entry)
+
 ```scala
 // Source: abtb/Bundles.scala:83-91
 class AheadBtbEntry(implicit p: Parameters) extends AheadBtbBundle {
   val valid:           Bool            = Bool()
-  val tag:             UInt            = UInt(TagWidth.W)           // 24-bit partial tag
-val position: UInt = UInt(CfiPositionWidth.W) // branch position in fetch block
-  val attribute:       BranchAttribute = new BranchAttribute
-  val targetLowerBits: UInt            = UInt(TargetLowerBitsWidth.W) // 22-bit partial target
-  val targetCarry: Option[TargetCarry] = if (EnableTargetFix) Option(new TargetCarry) else None
+  val tag:             UInt            = UInt(TagWidth.W)            // 24-bit
+  val position:        UInt            = UInt(CfiPositionWidth.W)    // 5-bit
+  val attribute:       BranchAttribute = new BranchAttribute         // 4-bit
+  val targetLowerBits: UInt            = UInt(TargetLowerBitsWidth.W)// 22-bit
+  val targetCarry:     Option[TargetCarry] = if (EnableTargetFix) Option(new TargetCarry) else None // 2-bit (opt)
 }
 ```
 
-| Field Name        | Width (bit)                | Description |
-|-------------------|----------------------------|-------------|
-| valid | 1 | entry validity |
-| tag | 24 (TagWidth) | PC[instOffsetBits + TagWidth - 1 : instOffsetBits] (range including bankIdx/setIdx) |
-| position | CfiPositionWidth | Branch location within fetch block |
-| attribute         | 4                          | BranchAttribute (branchType 2-bit + rasAction 2-bit) |
-| targetLowerBits | 22 (TargetLowerBitsWidth) | target lower bit (2B-aligned) |
-| targetCarry | 2 (opt) | EnableTargetFix=false Default → Not Included |
+| Field | Width (bit) | Source | Description |
+|-------|-------------|--------|-------------|
+| `valid` | 1 | Write path | Entry occupancy flag. `0` on reset or invalidation (multi-hit eviction). |
+| `tag` | 24 (`TagWidth`) | `getTag(PC_B)` at train | PC bits [24:1]. Overlaps `bankIdx`/`setIdx` range intentionally — cross-bank/set collision prevention. Compared against `getTag(s2_startPc)` at predict time. |
+| `position` | 5 (`CfiPositionWidth` = `log2Ceil(FetchBlockSize/instBytes)`) | `finalPrediction.cfiPosition` at train | Instruction slot index of the branch within the fetch block. 2-byte aligned (`(branchPc - blockStart) >> 1`). Used to select the earliest taken branch among way hits. |
+| `attribute` | 4 (`BranchAttribute`) | PreDecode at train | Branch type + RAS action. See sub-table below. |
+| `targetLowerBits` | 22 (`TargetLowerBitsWidth`) | `getTargetLowerBits(target)` at train | PC bits [22:1] of the branch target. Upper bits are recovered from `s2_startPc` + carry at predict time via `getFullTarget()`. |
+| `targetCarry` | 2 (`TargetCarry`, optional) | Computed at train | Overflow/underflow flag for target reconstruction when target crosses a `2^(TargetLowerBitsWidth+1)` boundary. **Disabled by default** (`EnableTargetFix = false`). |
+
+**Total entry width (default):** 1 + 24 + 5 + 4 + 22 = **56 bits**
+
+#### BranchAttribute sub-fields
+
+```scala
+// Source: bpu/Bundles.scala:37-60
+class BranchAttribute extends Bundle {
+  val branchType: UInt = BranchAttribute.BranchType()  // 2-bit
+  val rasAction:  UInt = BranchAttribute.RasAction()   // 2-bit
+}
+```
+
+**`branchType` (2-bit)**
+
+| Value | Name | RISC-V instructions | Predict behavior |
+|-------|------|---------------------|-----------------|
+| `0` | `None` | (no branch) | — |
+| `1` | `Conditional` | beq/bne/blt/bge/bltu/bgeu | Direction decided by `takenCounter` (or uTAGE override). Always allocated in ABTB only when taken. |
+| `2` | `Direct` | jal, c.jal | Always taken. Target from `targetLowerBits` (static). |
+| `3` | `Indirect` | jalr, c.jalr, c.jr | Always taken. Target from `targetLowerBits` (updated on mismatch). RAS provides return target if `isReturn`. |
+
+**`rasAction` (2-bit: `[push, pop]`)**
+
+| Value | Name | Meaning | Used by |
+|-------|------|---------|---------|
+| `0b00` | `None` | No RAS operation | OtherDirect / OtherIndirect / Conditional |
+| `0b01` | `Pop` | Return — pop RAS | `isReturn`: target overridden by uRAS at BPU top |
+| `0b10` | `Push` | Call — push return addr | `isCall`: push to RAS speculatively |
+| `0b11` | `PopAndPush` | Return-then-call | pop ret addr, push next PC |
+
+**Composite attribute presets (from `BranchAttribute` companion object):**
+
+| Preset | branchType | rasAction | Example |
+|--------|-----------|-----------|---------|
+| `Conditional` | `1` | `0b00` | beq |
+| `OtherDirect` | `2` | `0b00` | j (jal x0) |
+| `DirectCall` | `2` | `0b10` | jal x1 |
+| `OtherIndirect` | `3` | `0b00` | jr |
+| `Return` | `3` | `0b01` | ret (jalr x0, x1) |
+| `IndirectCall` | `3` | `0b10` | jalr x1 |
+| `ReturnAndCall` | `3` | `0b11` | jalr x1, x1 |
+
+#### TargetCarry (optional, disabled by default)
+
+```scala
+// Source: bpu/Bundles.scala:309-329
+class TargetCarry extends Bundle {
+  val value: UInt = TargetCarry.Value()  // 2-bit enum
+  // Fit=0, Overflow=1, Underflow=2
+}
+```
+
+| Value | Meaning |
+|-------|---------|
+| `Fit` (0) | `target[22:1]` fits within same upper-bit window as `startPc` |
+| `Overflow` (1) | Target crosses boundary upward (upper bits +1) |
+| `Underflow` (2) | Target crosses boundary downward (upper bits -1) |
+
+`getFullTarget()` uses this carry to correctly reconstruct the full target address. Without `EnableTargetFix`, upper bits are always taken from `s2_startPc`, causing misprediction for branches near `2^23`-aligned boundaries.
+
+#### TakenCounter (register, separate from SRAM)
+
+```scala
+// Source: abtb/Bundles.scala:28-31
+object TakenCounter extends SaturateCounterFactory {
+  def width(implicit p: Parameters): Int = abtbParameters.TakenCounterWidth  // default: 2
+}
+
+// Source: abtb/AheadBtb.scala:57-63
+private val takenCounter = RegInit(
+  VecInit.fill(NumBanks)(VecInit.fill(NumSets)(VecInit.fill(NumWays)(TakenCounter.Zero)))
+)
+// Shape: [4 banks][32 sets][8 ways], each 2-bit saturating counter
+```
+
+| Value range | Interpretation | State name |
+|------------|----------------|------------|
+| `0b00` (0) | Strongly not-taken | `SaturateNegative` |
+| `0b01` (1) | Weakly not-taken | `WeakNegative` |
+| `0b10` (2) | Weakly taken | `WeakPositive` |
+| `0b11` (3) | Strongly taken | `SaturatePositive` |
+
+- `isPositive` = `value[1]` = taken prediction output
+- New entry allocation → `resetWeakPositive()` (init to `0b10`, weakly taken)
+- Train: matching way → `selfIncrease()`, earlier conditional ways → `selfDecrease()`
+- Stored entirely in **flip-flops** (not SRAM) for single-cycle read access in s2
 
 ### Tag structure (the core of lookahead-read)
 
@@ -154,8 +243,48 @@ private val s1_takenMask = VecInit(s1_btbPrediction.zipWithIndex.map { case (pre
 | abtb | MicroTage (utage) | Conditional branch direction determination (override) | When matching abtb entry hit + position, use utage.taken |
 | abtb | MicroRas (uras) | return address provided | If s1_prediction.attribute.isReturn, use uras.retTarget |
 
-- abtb 8 way + ubtb 1 way = Select the first taken branch among a total of 9 s1_btbPrediction slots
+- Arbiter input: uBTB hit result (1 slot) + ABTB tag-matched way results (0~N slots); winner = smallest `cfiPosition` among valid taken entries
 - Final decision on direction of conditional branch: utage.taken or abtb.taken depending on whether utage hit or not
+
+### uBTB vs ABTB simultaneous hit arbitration
+
+```scala
+// Source: bpu/Bpu.scala:266-304
+private val s1_btbPrediction = VecInit(ubtb.io.prediction) ++ abtb.io.prediction
+// abtb.io.prediction: Vec(8, Valid[Prediction])
+//   → each way's .valid = s2_hitMask[i] (tag match result)
+//   → non-matching ways have valid=false and are excluded from selection
+```
+
+ABTB 8-way entries are already filtered by tag match before entering the arbiter — only tag-hit ways have `valid=true`. The selection pool is therefore:
+
+- **1 slot**: uBTB hit result (valid if uBTB hits)
+- **0~N slots**: ABTB tag-matched way results (valid only for ways where `entry.tag === getTag(PC_B)`)
+
+There is **no fixed predictor priority**. Among all valid taken entries, the one with the smallest `cfiPosition` (earliest branch in fetch block) is selected:
+
+```scala
+// Source: bpu/Bpu.scala:298-304
+private val s1_compareMatrix      = CompareMatrix(VecInit(s1_btbPrediction.map(_.bits.cfiPosition)))
+private val s1_firstTakenBranchOH = s1_compareMatrix.getLeastElementOH(s1_takenMask)
+private val s1_firstTakenBranch   = Mux1H(s1_firstTakenBranchOH, s1_btbPrediction)
+```
+
+| Scenario | Winner |
+|----------|--------|
+| Only uBTB hits | uBTB |
+| Only ABTB hits | ABTB tag-matched way(s), smallest `cfiPosition` |
+| Both hit, **different** `cfiPosition` | Whichever has the **smaller** `cfiPosition` (earlier in fetch block) |
+| Both hit, **same** `cfiPosition` | Same branch — results consistent |
+
+```scala
+// Debug signals (bpu/Bpu.scala:311-314)
+// s1_firstTakenBranchOH(0) = uBTB slot (index 0 in s1_btbPrediction)
+debug_s1UseUbtb      = s1_taken && s1_firstTakenBranchOH(0) && !s1_utageHitMask(0)
+debug_s1UseUbtbUtage = s1_taken && s1_firstTakenBranchOH(0) && s1_utageHitMask(0)
+debug_s1UseAbtb      = s1_taken && !s1_firstTakenBranchOH(0) && !s1_utageHitMask.drop(1).reduce(_ || _)
+debug_s1UseAbtbUtage = s1_taken && !s1_firstTakenBranchOH(0) && s1_utageHitMask.drop(1).reduce(_ || _)
+```
 
 ---
 

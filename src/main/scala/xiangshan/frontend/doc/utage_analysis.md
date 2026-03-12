@@ -386,9 +386,142 @@ case 1 => t.usefulReset := highTickCounter(HighTickWidth)
 
 ---
 
+## 1.9 Indexing / Hashing Method
+
+### History type: PHR (Path History Register)
+
+uTAGE는 GHR(taken/not-taken 이진 히스토리)이 아니라 **PHR(경로 해시 히스토리)**을 사용한다.
+
+```scala
+// Source: bpu/history/phr/Helpers.scala:60-63
+def pathHash(pc: PrunedAddr, target: PrunedAddr): UInt = {
+  val hash = Cat(pc(9, 1), 0.U(4.W)) ^ target(16, 2) // magic numbers
+  hash(PathHashWidth - 1, 0)  // PathHashWidth = 15
+}
+```
+
+| 항목 | 내용 |
+|------|------|
+| 히스토리 단위 | 분기 1개 = `pathHash(branchPC, target)` 15-bit 해시값 |
+| 업데이트 조건 | taken branch마다 PHR에 shift-in |
+| PC 기여 | `pc[9:1]` (9 bits) → 4-bit left-shift 후 사용 |
+| Target 기여 | `target[16:2]` (15 bits) |
+| PHR 전체 길이 | `nextMultipleOf(MaxHistLen + Shamt*FtqSize + FtqFullFix, 4)` — Shamt=2, FtqSize=8, FtqFullFix=4 |
+
+PHR은 folded form으로만 각 예측기에 전달된다. uTAGE가 받는 `foldedPathHist`는 `PhrAllFoldedHistories` 타입으로, 필요한 `(histLen, foldedLen)` 쌍마다 하나의 `PhrFoldedHistory`를 포함한다.
+
+### 실제 config 파라미터 (Configs.scala MinimalConfig)
+
+```scala
+// Source: top/Configs.scala:123-127
+// MicroTageInfo(NumSets, HistoryLength, HistBitsInTag, TagWidth)
+new MicroTageInfo(512, 6,  6, 15),  // Table-0
+new MicroTageInfo(512, 12, 6, 15)   // Table-1
+```
+
+### Folded history 인스턴스 (테이블별)
+
+```scala
+// Source: bpu/utage/MicroTageTable.scala:79-81
+val idxFhInfo    = FoldedHistoryInfo(histLen, min(log2Ceil(numSets), histLen))
+val tagFhInfo    = FoldedHistoryInfo(histLen, min(histLen, histBitsInTag))
+val altTagFhInfo = FoldedHistoryInfo(histLen, min(histLen, histBitsInTag - 1))
+```
+
+| Table | histLen | histBitsInTag | idxFh (histLen→foldedLen) | tagFh | altTagFh |
+|-------|---------|---------------|---------------------------|-------|----------|
+| Table-0 | 6 | 6 | 6→**6** (min(9,6)) | 6→**6** | 6→**5** |
+| Table-1 | 12 | 6 | 12→**9** (min(9,12)) | 12→**6** | 12→**5** |
+
+### computeHash 상세
+
+```scala
+// Source: bpu/utage/MicroTageTable.scala:83-98
+val unhashedIdx = pc[VAddrBits-1 : instOffsetBits]  // PC[38:1], instOffsetBits=1
+val unhashedTag = pc[VAddrBits-1 : PCHighTagStart]  // PC[38:7], PCHighTagStart=7
+
+// --- Index ---
+// Case A: idxFh.FoldedLength < log2Ceil(numSets)  →  double-XOR to cover full index width
+//   foldShift = log2Ceil(numSets) - idxFhInfo.FoldedLength
+//   idx = (unhashedIdx ^ Cat(0[foldShift], idxFh) ^ (idxFh << foldShift))[idxWidth-1:0]
+// Case B: idxFh.FoldedLength == log2Ceil(numSets)  →  simple XOR
+//   idx = (unhashedIdx ^ idxFh)[idxWidth-1:0]
+
+// --- Tag ---
+val lowTag  = (unhashedTag ^ tagFh ^ (altTagFh << 1))[histBitsInTag-1:0]
+val highTag = connectPcTag(unhashedIdx, tableId)  // tableId별 PC bit 선택
+val tag     = Cat(highTag, lowTag)[tagLen-1:0]
+```
+
+**Table-0 index** (idxFhFoldedLen=6 < 9 → Case A, foldShift=3):
+```
+idx[8:0] = (unhashedIdx ^ Cat(000, idxFh[5:0]) ^ (idxFh[5:0] << 3))[8:0]
+```
+
+**Table-1 index** (idxFhFoldedLen=9 == 9 → Case B):
+```
+idx[8:0] = (unhashedIdx ^ idxFh[8:0])[8:0]
+```
+
+**Tag 구성 (두 테이블 모두 tagLen=15):**
+```
+tag[14:0] = Cat(highTag, lowTag)[14:0]
+
+lowTag[5:0]  = (PC[38:7] ^ tagFh ^ (altTagFh << 1))[5:0]
+               ↑ history가 tag에 반영되는 부분 (aliasing 감소)
+
+highTag      = connectPcTag(unhashedIdx, tableId)
+               ↑ PC bit를 직접 선택해 tag 상위를 채움 (collision 감소)
+```
+
+#### connectPcTag — tableId별 PC bit 선택
+
+```scala
+// Source: bpu/utage/Parameters.scala:63-75
+// tableId=0 (Short):  unhashedIdx 비트 concat → PC bits {16,14,12,10,8,7,6,5,4,3,2} = 11 bits
+PCTagHashBitsForShortHistory  = Seq(15, 13, 11, 9, 7, 6, 5, 4, 3, 2, 1)
+
+// tableId=1 (Medium): unhashedIdx 비트 concat → PC bits {19,17,15,13,11,7,6,5,3,2} = 10 bits
+PCTagHashBitsForMediumHistory = Seq(18, 16, 14, 12, 10, 6, 5, 4, 2, 1)
+// (unhashedIdx bit i = PC bit i+1)
+```
+
+| Table | highTag bits | lowTag bits | tag 총 비트 |
+|-------|-------------|-------------|------------|
+| Table-0 | 11 (Short PC bits) | 6 | Cat → 17, **truncated to 15** |
+| Table-1 | 10 (Medium PC bits) | 6 | Cat → 16, **truncated to 15** |
+
+### Train path
+
+학습 시에는 예측 시점과 다른 PHR 스냅샷(`foldedPathHistForTrain`)으로 동일한 `computeHash`를 재실행한다.
+
+```scala
+// Source: bpu/utage/MicroTageTable.scala:117-118
+private val (trainIdx, trainTag) =
+  computeHash(io.update.bits.startPc, io.update.bits.foldedPathHistForTrain, tableId)
+```
+
+`foldedPathHistForTrain`은 BPU top에서 s3 시점 PHR 상태로 전달된다 (`fastTrain.bits.foldedPathHistForTrain`).
+
+### 요약
+
+| 항목 | Table-0 | Table-1 |
+|------|---------|---------|
+| History type | PHR | PHR |
+| HistoryLength | 6 path entries | 12 path entries |
+| idxFh 폭 | 6-bit folded | 9-bit folded |
+| Index hash | double-XOR (foldShift=3) | simple XOR |
+| Tag low | PC[38:7] XOR tagFh(6b) XOR (altTagFh(5b)<<1) | 동일 구조 |
+| Tag high (PC bits) | {PC[16,14,12,10,8,7,6,5,4,3,2]} | {PC[19,17,15,13,11,7,6,5,3,2]} |
+| tagLen | 15 bits | 15 bits |
+| History bits used in tag | 6 | 6 |
+| Use history for idx | Yes (PHR folded) | Yes (PHR folded) |
+
+---
+
 ## Quality Checklist
 
-- [x] Comply with order 1.1~1.8
+- [x] Comply with order 1.1~1.9
 - [x] specify memory depth/width/tables/banks/read/write ports
 - [x] Includes memory entry code snippet
 - [x] Completion of width/description table for each field
