@@ -263,25 +263,47 @@ s1_utageMeta := utage.io.meta.bits
 ## 1.8 Training method
 
 ### Training Traits
-MicroTage is a **fast-train only** predictor. There is no resolve(commit-time) train.
+
+MicroTage is a **fast-train only** predictor. There is no FTQ commit-time (resolve) train path.
 
 ```scala
 // Source: bpu/utage/Parameters.scala:59
 def EnableFastTrain: Boolean = true
-// utage can only be fast-trained, we don't have continous predict block on resolve
+// utage can only be fast-trained, we don't have continuous predict block on resolve
 ```
 
+uTAGE pairs with aBTB (AheadBTB), which predicts 1 block ahead. At cycle T, while the BPU processes block N, aBTB speculatively predicts block N+1 and uTAGE overrides the direction for that ahead-predicted branch. Training fires when block N+1 later reaches s3, using the s3 final prediction as the "ground truth" — no FTQ commit is needed.
+
 ### Training Trigger
-- **t0_fire** = `io.fastTrain.get.valid && io.enable`
-- Trigger condition: Immediate learning when the s3 prediction result is different from the s1 prediction (`hasOverride`) or when the s3 prediction is confirmed
+
+**`t0_fire`** = `s3_valid && io.enable` — fires every time s3 is valid.
+
+However, actual table writes are conditional:
 
 ```scala
-// Source: bpu/utage/MicroTage.scala:127-158
-private val t0_fire        = io.fastTrain.get.valid && io.enable
-private val t0_trainMeta   = io.fastTrain.get.bits.utageMeta
-private val t0_trainData   = io.fastTrain.get.bits.finalPrediction
-private val t0_trainOverride = io.fastTrain.get.bits.hasOverride
+// Source: bpu/utage/MicroTage.scala:214-219
+t.update.valid := t0_fire &&
+  ((t0_allocMask(i) && t0_histTableNeedAlloc) ||
+   (t0_providerMask(i) && t0_histTableNeedUpdate))
+t.update.bits.allocValid  := t0_allocMask(i) && t0_histTableNeedAlloc
+t.update.bits.updateValid := t0_providerMask(i) && t0_histTableNeedUpdate && fastTrainHasPredBr
+t.update.bits.usefulValid := t0_providerMask(i) && t0_histTableNeedUpdate &&
+  (t0_histHitMisPred || (baseNotMatchHistPred && fastTrainHasPredBr))
+```
 
+| Write operation | Condition |
+|-----------------|-----------|
+| **Update** (takenCtr) | `t0_predHit` (uTAGE hit at s1) AND `fastTrainHasPredBr` (predicted branch is on the executed path) |
+| **Alloc** (new entry) | `t0_misPred` AND allocatable entry exists |
+| **Useful update** | hit AND (mispred OR base prediction disagreed with uTAGE) |
+
+If uTAGE had no hit at s1 and there was no misprediction, no write occurs even though `t0_fire` is asserted.
+
+#### Misprediction conditions
+
+```scala
+// Source: bpu/utage/MicroTage.scala:146-158
+// Hit-based mispred: uTAGE hit but predicted wrong taken or wrong cfiPosition
 private val t0_histHitMisPred = t0_predHit && (
   (!t0_trainData.attribute.isConditional && t0_predTaken) ||
   (t0_trainData.attribute.isConditional && (
@@ -289,19 +311,51 @@ private val t0_histHitMisPred = t0_predHit && (
     (t0_predCfiPosition =/= t0_trainData.cfiPosition)
   ))
 )
+// Miss-based mispred: uTAGE missed, but s3 says a cond branch was taken (hasOverride)
 private val t0_histMissHitMisPred =
   !t0_predHit && t0_trainData.attribute.isConditional &&
   t0_trainData.taken && t0_fire && io.fastTrain.get.bits.hasOverride
 
-private val t0_misPred             = t0_histHitMisPred || t0_histMissHitMisPred
-private val t0_histTableNeedAlloc  = t0_misPred && t0_fire
+private val t0_misPred            = t0_histHitMisPred || t0_histMissHitMisPred
+private val t0_histTableNeedAlloc = t0_misPred && t0_fire
 private val t0_histTableNeedUpdate = t0_predHit && t0_fire
 ```
 
-### Information stored by FTQ
+### Example: cold-miss walkthrough (PC_A → taken → PC_C)
 
-MicroTage's meta is not stored directly by FTQ, but Bpu top stores it in **s1→s2→s3 register chain** and then transfers it to t0 with `BpuFastTrain`.
-(BpuFastTrain is a BPU internal route that does not go through FTQ)
+**Setup:** Block PC_A contains a conditional taken branch targeting PC_C. PC_B is the sequential fall-through. All predictors cold start.
+
+**1st encounter of PC_A** — aBTB miss, uTAGE miss:
+
+| Stage | Event |
+|-------|-------|
+| s1 | aBTB miss, uBTB miss → prediction: not-taken, next = PC_B |
+| s3 | TAGE also misses → agrees with s1 (not-taken) → `s3_override = false` |
+| fast-train | `t0_fire=true`, `hasOverride=false` → `t0_histMissHitMisPred = false` → **uTAGE: no write** |
+| BPU output | PC_B (wrong — should be PC_C) |
+| FTQ commit | Backend resolves misprediction → redirect to PC_C |
+| aBTB | **Trained via FTQ commit** → allocates entry (PC_A, cfiPos X → taken, target PC_C) |
+| uTAGE | **No commit-time train path** → not trained |
+
+**2nd encounter of PC_A** — aBTB hits, uTAGE still miss:
+
+| Stage | Event |
+|-------|-------|
+| s1 | aBTB hits → predicts taken, target PC_C |
+| s3 | TAGE misses → agrees with s1 (taken) → `s3_override = false` |
+| fast-train | `hasOverride=false` → **uTAGE: still no write** |
+
+**Key insight:** aBTB and uTAGE do **not** train at the same time. aBTB learns from the FTQ commit redirect immediately. uTAGE, being fast-train only, can only allocate when `hasOverride=true` (s3 overrides s1) **and** `s3.taken=true`. This requires a scenario where s1 (aBTB) predicts not-taken but s3 (TAGE) overrides to taken — a case that occurs on subsequent encounters once TAGE accumulates enough history for the same PC under a different path context.
+
+```
+uTAGE first alloc condition (miss-based):
+  !predHit && isConditional && s3.taken=true && s3_override=true
+→ s1 predicts not-taken, s3 TAGE overrides to taken
+```
+
+### Training data source
+
+MicroTage's meta is not stored in FTQ. BPU top carries it through the **s1→s2→s3 register chain** and delivers it to uTAGE via `BpuFastTrain` (a BPU-internal route, bypassing FTQ).
 
 ```scala
 // Source: bpu/Bundles.scala:252-258
@@ -381,9 +435,9 @@ case 1 => t.usefulReset := highTickCounter(HighTickWidth)
 - `usefulEntries`: update and usefulReset can occur simultaneously, but `when(io.usefulReset)` blocks are processed separately (Chisel last-connect semantics → io.usefulReset takes priority)
 - t0 fast-train alloc or update up to 1 table in a single cycle → no port conflict
 
-| Trigger         | Required FTQ Info              | FTQ Storage / BPU Internal         | Write Port / Conflict Handling                    |
-|-----------------|--------------------------------|------------------------------------|---------------------------------------------------|
-| `t0_fire` (fast-train) | `MicroTageMeta` (s1 capture) | In BPU s1→s2→s3 RegEnable chain + `BpuFastTrain` | 1 write port per table, no conflicts; useful reset handles separate branches |
+| Trigger | Ground truth source | Meta transport | Write Port / Conflict Handling |
+|---------|---------------------|----------------|-------------------------------|
+| `s3_valid` (every s3 cycle) | `s3_prediction` (BPU final, not commit) | BPU s1→s2→s3 RegEnable chain → `BpuFastTrain` (no FTQ) | 1 write port per table; actual write only on hit or mispred; useful reset is separate |
 
 ---
 
