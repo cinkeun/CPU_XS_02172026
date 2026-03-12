@@ -391,7 +391,7 @@ case 1 => t.usefulReset := highTickCounter(HighTickWidth)
 
 ### History type: PHR (Path History Register)
 
-uTAGE는 GHR(taken/not-taken 이진 히스토리)이 아니라 **PHR(경로 해시 히스토리)**을 사용한다.
+uTAGE uses **PHR (Path History Register)**, not GHR (taken/not-taken binary history).
 
 ```scala
 // Source: bpu/history/phr/Helpers.scala:60-63
@@ -401,17 +401,17 @@ def pathHash(pc: PrunedAddr, target: PrunedAddr): UInt = {
 }
 ```
 
-| 항목 | 내용 |
-|------|------|
-| 히스토리 단위 | 분기 1개 = `pathHash(branchPC, target)` 15-bit 해시값 |
-| 업데이트 조건 | taken branch마다 PHR에 shift-in |
-| PC 기여 | `pc[9:1]` (9 bits) → 4-bit left-shift 후 사용 |
-| Target 기여 | `target[16:2]` (15 bits) |
-| PHR 전체 길이 | `nextMultipleOf(MaxHistLen + Shamt*FtqSize + FtqFullFix, 4)` — Shamt=2, FtqSize=64, FtqFullFix=4 |
+| Item | Detail |
+|------|--------|
+| History unit | 1 taken branch = `pathHash(branchPC, target)` → 15-bit hash value |
+| Update condition | Shift-in to PHR on every taken branch |
+| PC contribution | `pc[9:1]` (9 bits) → left-shifted by 4 |
+| Target contribution | `target[16:2]` (15 bits) |
+| PHR total length | `nextMultipleOf(MaxHistLen + Shamt*FtqSize + FtqFullFix, 4)` — Shamt=2, FtqSize=64, FtqFullFix=4 |
 
-PHR은 folded form으로만 각 예측기에 전달된다. uTAGE가 받는 `foldedPathHist`는 `PhrAllFoldedHistories` 타입으로, 필요한 `(histLen, foldedLen)` 쌍마다 하나의 `PhrFoldedHistory`를 포함한다.
+PHR is delivered to each predictor in folded form only. The `foldedPathHist` received by uTAGE is of type `PhrAllFoldedHistories`, containing one `PhrFoldedHistory` per required `(histLen, foldedLen)` pair.
 
-### Default config 파라미터 (utage/Parameters.scala)
+### Default config parameters (utage/Parameters.scala)
 
 ```scala
 // Source: bpu/utage/Parameters.scala:25-29
@@ -420,7 +420,7 @@ new MicroTageInfo(512, 9,  9, 15),  // Table-0
 new MicroTageInfo(512, 16, 12, 16)  // Table-1
 ```
 
-### Folded history 인스턴스 (테이블별)
+### Folded history instances (per table)
 
 ```scala
 // Source: bpu/utage/MicroTageTable.scala:79-81
@@ -434,10 +434,10 @@ val altTagFhInfo = FoldedHistoryInfo(histLen, min(histLen, histBitsInTag - 1))
 | Table-0 | 9 | 9 | 9→**9** (min(9,9)) | 9→**9** | 9→**8** |
 | Table-1 | 16 | 12 | 16→**9** (min(9,16)) | 16→**12** | 16→**11** |
 
-### idxFh 증분 업데이트 (PhrFoldedHistory.update)
+### idxFh incremental update (PhrFoldedHistory.update)
 
-`idxFh`는 raw PHR에서 매 사이클 새로 읽어 오는 것이 아니라, 이전 `idxFh`에 증분 업데이트를 적용하여 유지한다.
-업데이트는 `bpu/history/phr/Bundles.scala`의 `PhrFoldedHistory.update()` 에 의해 수행된다.
+`idxFh` is not re-read from the raw PHR every cycle. Instead, it is maintained by applying an incremental update to the previous `idxFh`.
+The update is performed by `PhrFoldedHistory.update()` in `bpu/history/phr/Bundles.scala`.
 
 ```scala
 // Source: bpu/history/phr/Bundles.scala:89, 107-148
@@ -446,7 +446,7 @@ def needOldestBits: Boolean = info.HistoryLength > info.FoldedLength
 
 #### Table-0: histLen=9, foldedLen=9 (`needOldestBits = false`)
 
-`histLen == foldedLen` → 히스토리가 절대 wrap-around하지 않으므로 단순 shift register:
+`histLen == foldedLen` → history never wraps around, so it is a plain shift register:
 
 ```
 newFoldedHist[8:0] = ((idxFh_old << 2) | shiftBits)[8:0]
@@ -454,8 +454,8 @@ idxFh_new[8:0]     = newFoldedHist[8:0] ^ computeFoldedHash(Cat(hashHigh, 0.U(2.
 ```
 
 - `shiftBits = pathHash[1:0]` (Shamt=2 new bits, newest branch at MSB)
-- `hashHigh = pathHash[14:2]` (13 bits): `computeFoldedHash`를 통해 9-bit XOR 마스크로 접힘
-- `computeFoldedHash(Cat(hashHigh, 00), 9)(9)`: 15-bit 값을 9-bit 청크로 XOR 접기
+- `hashHigh = pathHash[14:2]` (13 bits): folded into a 9-bit XOR mask via `computeFoldedHash`
+- `computeFoldedHash(Cat(hashHigh, 00), 9)(9)`: XOR-folds the 15-bit value into 9-bit chunks
 
 ```scala
 // Source: bpu/history/phr/Bundles.scala:138-141 (needOldestBits=false 경로)
@@ -467,50 +467,50 @@ fh.foldedHist := newFoldedHist ^ hashFolded
 
 #### Table-1: histLen=16, foldedLen=9 (`needOldestBits = true`)
 
-`histLen > foldedLen` → 가장 오래된 비트가 wrap-around하여 빠져나가므로 순환 시프트 + oldest-bit XOR-out:
+`histLen > foldedLen` → the oldest bits wrap around and exit, requiring circular shift + oldest-bit XOR-out:
 
 ```
-// 1. oldest bits 계산 (phr 배열에서 직접 읽음)
-oldestBit[0] = phr[histLen-1]  = phr[15]   // 가장 오래된 비트
-oldestBit[1] = phr[histLen-2]  = phr[14]   // 두 번째로 오래된 비트
+// 1. Read oldest bits directly from the phr array
+oldestBit[0] = phr[histLen-1]  = phr[15]   // oldest bit
+oldestBit[1] = phr[histLen-2]  = phr[14]   // second oldest bit
 
-// 2. XOR 단계 (shift 전)
+// 2. XOR stage (before shift)
 xored = (old foldedHist)
-      XOR (wrap-around하는 oldest bits를 해당 foldedLen 내 위치에 XOR-out)
-      XOR (shiftBits를 MSB 위치에 XOR-in)
+      XOR (oldest bits that wrap around, XOR-out at their position within foldedLen)
+      XOR (shiftBits XOR-in at MSB positions)
 
-// 3. 순환 왼쪽 시프트 by 2
+// 3. Circular left shift by 2
 newFoldedHist[8:0] = circularShiftLeft(xored, 2)
 
-// 4. hashHigh 혼합
+// 4. Mix in hashHigh
 idxFh_new[8:0] = newFoldedHist[8:0] ^ computeFoldedHash(Cat(hashHigh, 0.U(2.W)), 9)(16)
 ```
 
 - `oldestBitPosInFolded = [histLen-1 % foldedLen, histLen-2 % foldedLen] = [15%9, 14%9] = [6, 5]`
-- `oldestBitWrapAround = [15/9 > 0, 14/9 > 0] = [true, true]` → 두 oldest bit 모두 XOR-out 대상
-- `newestBitsSet`: `shiftBits[1]`을 `foldedLen-1=8` 위치, `shiftBits[0]`을 `foldedLen-2=7` 위치에 XOR-in
+- `oldestBitWrapAround = [15/9 > 0, 14/9 > 0] = [true, true]` → both oldest bits are XOR-out targets
+- `newestBitsSet`: `shiftBits[1]` XOR-in at position `foldedLen-1=8`, `shiftBits[0]` at position `foldedLen-2=7`
 
-#### 공통: `computeFoldedHash`
+#### Common: `computeFoldedHash`
 
 ```scala
 // Source: bpu/history/phr/Helpers.scala:65-75
 def computeFoldedHash(value: UInt, compLen: Int)(histLen: Int): UInt
-// Cat(hashHigh, 0.U(2.W)) = 15-bit 값
+// Cat(hashHigh, 0.U(2.W)) = 15-bit value
 // compLen = foldedLen (9)
 // histLen = Table-0: 9, Table-1: 16
-// → value[histLen-1:0]를 compLen-bit 청크로 쪼개 XOR 접기
+// → splits value[histLen-1:0] into compLen-bit chunks and XOR-folds them
 ```
 
-#### idxFh 갱신 우선순위 (Phr.scala)
+#### idxFh update priority (Phr.scala)
 
 ```
-redirect.valid    → redirectData.foldedPhr   (raw PHR로부터 전체 재계산)
-elsewhen s3_override → s3_foldedPhrReg.update()  (증분)
-elsewhen s1_valid    → s1_foldedPhrReg.update()  (증분)
-otherwise            → s0_foldedPhrReg          (이전 사이클 유지)
+redirect.valid       → redirectData.foldedPhr      (full recompute from raw PHR)
+elsewhen s3_override → s3_foldedPhrReg.update()    (incremental)
+elsewhen s1_valid    → s1_foldedPhrReg.update()    (incremental)
+otherwise            → s0_foldedPhrReg              (hold previous cycle)
 ```
 
-### computeHash 상세
+### computeHash detail
 
 ```scala
 // Source: bpu/utage/MicroTageTable.scala:83-98
@@ -540,7 +540,7 @@ idx[8:0] = (unhashedIdx ^ idxFh[8:0])[8:0]
 idx[8:0] = (unhashedIdx ^ idxFh[8:0])[8:0]
 ```
 
-**Tag 구성:**
+**Tag construction:**
 ```
 // Table-0: tagLen=15, histBitsInTag=9
 tag[14:0] = Cat(highTag, lowTag)[14:0]
@@ -555,26 +555,26 @@ lowTag[11:0] = (PC[38:7] ^ tagFh[11:0] ^ (altTagFh[10:0] << 1))[11:0] // 12 bits
 highTag      = connectPcTag(unhashedIdx, 1)  // 10 PC bits → Cat → truncated to 4
 ```
 
-#### connectPcTag — tableId별 PC bit 선택
+#### connectPcTag — PC bit selection per tableId
 
 ```scala
 // Source: bpu/utage/Parameters.scala:63-75
-// tableId=0 (Short):  unhashedIdx 비트 concat → PC bits {16,14,12,10,8,7,6,5,4,3,2} = 11 bits
+// tableId=0 (Short):  concat unhashedIdx bits → PC bits {16,14,12,10,8,7,6,5,4,3,2} = 11 bits
 PCTagHashBitsForShortHistory  = Seq(15, 13, 11, 9, 7, 6, 5, 4, 3, 2, 1)
 
-// tableId=1 (Medium): unhashedIdx 비트 concat → PC bits {19,17,15,13,11,7,6,5,3,2} = 10 bits
+// tableId=1 (Medium): concat unhashedIdx bits → PC bits {19,17,15,13,11,7,6,5,3,2} = 10 bits
 PCTagHashBitsForMediumHistory = Seq(18, 16, 14, 12, 10, 6, 5, 4, 2, 1)
 // (unhashedIdx bit i = PC bit i+1)
 ```
 
-| Table | highTag bits | lowTag bits | tag 총 비트 |
-|-------|-------------|-------------|------------|
+| Table | highTag bits | lowTag bits | total tag bits |
+|-------|-------------|-------------|----------------|
 | Table-0 | 11 (Short PC bits) | 9 | Cat → 20, **truncated to 15** |
 | Table-1 | 10 (Medium PC bits) | 12 | Cat → 22, **truncated to 16** |
 
 ### Train path
 
-학습 시에는 예측 시점과 다른 PHR 스냅샷(`foldedPathHistForTrain`)으로 동일한 `computeHash`를 재실행한다.
+At training time, the same `computeHash` is re-executed with a different PHR snapshot (`foldedPathHistForTrain`) taken at the s3 stage.
 
 ```scala
 // Source: bpu/utage/MicroTageTable.scala:117-118
@@ -582,15 +582,15 @@ private val (trainIdx, trainTag) =
   computeHash(io.update.bits.startPc, io.update.bits.foldedPathHistForTrain, tableId)
 ```
 
-`foldedPathHistForTrain`은 BPU top에서 s3 시점 PHR 상태로 전달된다 (`fastTrain.bits.foldedPathHistForTrain`).
+`foldedPathHistForTrain` is passed from BPU top as the PHR state at s3 (`fastTrain.bits.foldedPathHistForTrain`).
 
-### 요약
+### Summary
 
-| 항목 | Table-0 | Table-1 |
+| Item | Table-0 | Table-1 |
 |------|---------|---------|
 | History type | PHR | PHR |
-| HistoryLength (PHR bits) | **9** (~4 taken branches) | **16** (8 taken branches) |
-| idxFh 폭 | 9-bit folded | 9-bit folded |
+| HistoryLength (PHR bits) | **9** (~4 taken branches) | **16** (~8 taken branches) |
+| idxFh width | 9-bit folded | 9-bit folded |
 | Index hash | simple XOR (Case B) | simple XOR (Case B) |
 | Tag low | PC[38:7] XOR tagFh(9b) XOR (altTagFh(8b)<<1) → 9 bits | PC[38:7] XOR tagFh(12b) XOR (altTagFh(11b)<<1) → 12 bits |
 | Tag high (PC bits) | {PC[16,14,12,10,8,7,6,5,4,3,2]} (11b→6b) | {PC[19,17,15,13,11,7,6,5,3,2]} (10b→4b) |
