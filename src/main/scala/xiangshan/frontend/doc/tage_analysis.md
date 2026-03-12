@@ -151,7 +151,7 @@ tage.io.fromMainBtb.result := mbtb.io.result
 
 - mBTB provides branch candidates (`NumBtbResultEntries`) in s2
 - TAGE generates per-branch predictions by XORing `cfiPosition` of each branch candidate to tag.
-- When mBTB misses, base prediction = taken value of mBTB entry → stored in `altOrBasePred`
+- In prediction meta, `altOrBasePred` falls back to `branch.bits.taken` when no alt provider exists.
 - When training, TAGE looks up `meta.mbtb.entries` of mBTB and refers to the counter (base pred) of the branch.
 
 ```scala
@@ -358,6 +358,159 @@ val valid = readPort.valid && !way.io.r.req.ready  // write only when SRAM read 
 
 ---
 
+## 1.8 TAGE Table Indexing and Hashing Method
+
+### AddrField layout
+
+```scala
+// Source: bpu/tage/Helpers.scala:51-58
+val addrFields = AddrField(
+  Seq(
+    ("instOffset", instOffsetBits),  // PC[0:0]   (1 bit, RVC 2B-align offset)
+    ("bankIdx",    BankIdxWidth),    // PC[2:1]   (2 bit, log2Ceil(NumBanks=4))
+    ("setIdx",     SetIdxWidth),     // PC[11:3]  (9 bit, log2Ceil(NumSets=512))
+    ("tag",        TagWidth)         // PC[24:12] (13 bit)
+  )
+)
+```
+
+- All 8 tables share the same `Size=4096`, `NumWays=2`, `NumBanks=4`
+- `NumSets = Size / NumWays / NumBanks = 4096 / 2 / 4 = 512`, `SetIdxWidth = 9`
+- PC bit layout is identical across all tables; **only the folded history width varies per table**
+
+### Predict path index calculation
+
+```scala
+// Source: bpu/tage/Helpers.scala:61-68
+def getBankIndex(pc: PrunedAddr): UInt =
+  addrFields.extract("bankIdx", pc)                    // PC[2:1], no history
+
+def getSetIndex(pc: PrunedAddr, hist: UInt): UInt =
+  addrFields.extract("setIdx", pc) ^ hist              // PC[11:3] XOR foldedHist.forIdx
+
+def getRawTag(pc: PrunedAddr, hist: UInt): UInt =
+  addrFields.extract("tag", pc) ^ hist                 // PC[24:12] XOR foldedHist.forTag
+```
+
+**Per-branch final tag** (XOR with cfiPosition at s2):
+```scala
+// Source: bpu/tage/Tage.scala:125
+val tag = s2_rawTag(tableIdx) ^ position   // rawTag XOR cfiPosition
+```
+
+**useAltOnNa index**:
+```scala
+// Source: bpu/tage/Helpers.scala:41-44
+def getUseAltOnNaIdx(pc: PrunedAddr): UInt =
+  pc(log2Ceil(NumUseAltOnNa) - 1 + instOffsetBits, instOffsetBits)
+  // = cfiPC[7:1] (7 bits, NumUseAltOnNa=128)
+```
+
+### Folded history calculation (per table)
+
+```scala
+// Source: bpu/tage/Helpers.scala:27-36
+def getFoldedHist(...): Vec[TageFoldedHist] = VecInit(TableInfos.map { implicit tableInfo =>
+  val tageFoldedHist = tableInfo.getTageFoldedHistoryInfo(NumBanks, TagWidth).map { histInfo =>
+    allFoldedPathHist.getHistWithInfo(histInfo).foldedHist
+  }
+  foldedHist.forIdx := tageFoldedHist.head                               // fold[0]
+  foldedHist.forTag := tageFoldedHist(1) ^ Cat(tageFoldedHist(2), 0.U(1.W))  // fold[1] XOR (fold[2] << 1)
+})
+
+// Source: bpu/Types.scala:67-78 (getTageFoldedHistoryInfo)
+// fold[0]: FoldedHistoryInfo(histLen, min(histLen, SetIdxWidth))   → used for setIdx
+// fold[1]: FoldedHistoryInfo(histLen, min(histLen, TagWidth))      → used for tag (high)
+// fold[2]: FoldedHistoryInfo(histLen, min(histLen, TagWidth-1))    → used for tag (low, shifted)
+```
+
+`forTag = fold(histLen, min(histLen, 13)) XOR Cat(fold(histLen, min(histLen, 12)), 0)`
+→ Two independent folds of different widths are combined to produce a 13-bit tag component.
+
+### Per-table fold width summary
+
+All tables: `NumSets=512`, `SetIdxWidth=9`, `TagWidth=13`
+
+| Table | histLen | forIdx fold width | forTag: fold[1] width | forTag: fold[2] width |
+|-------|---------|-------------------|-----------------------|-----------------------|
+| 0 | 4 | min(4,9) = **4** | min(4,13) = **4** | min(4,12) = **4** |
+| 1 | 9 | min(9,9) = **9** | min(9,13) = **9** | min(9,12) = **9** |
+| 2 | 17 | min(17,9) = **9** | min(17,13) = **13** | min(17,12) = **12** |
+| 3–7 | 29–397 | **9** (saturated) | **13** (saturated) | **12** (saturated) |
+
+Tables 0–1: histLen is short enough that no saturation occurs — fold width = histLen.
+Tables 2–7: fold widths are fully saturated at SetIdxWidth/TagWidth limits.
+
+### History source used by TAGE indexing: PHR
+
+TAGE indexing/tagging receives folded history from PHR:
+
+```scala
+// Source: bpu/Bpu.scala:223
+tage.io.fromPhr.foldedPathHist := phr.io.s0_foldedPhr
+```
+
+PHR (Predicted History Register) stores **path hash** bits, not branch direction (taken/not-taken):
+
+```scala
+// Source: bpu/history/phr/Helpers.scala:60-63
+def pathHash(pc: PrunedAddr, target: PrunedAddr): UInt =
+  (Cat(pc(9, 1), 0.U(4.W)) ^ target(16, 2))(PathHashWidth-1, 0)  // PC[9:1] ^ target[16:2]
+
+// Source: bpu/history/phr/Phr.scala:131-133
+private val hash      = pathHash(updateCfiPc, updateTarget)
+private val shiftBits = hash(Shamt - 1, 0)              // hash[1:0]  → pushed into phr buffer
+private val hashHigh  = hash(PathHashWidth - 1, Shamt)  // hash[14:2] → XOR'd into phr buffer
+
+// Source: bpu/history/phr/Phr.scala:141-149
+when(updateData.taken) {   // ← only taken branches trigger update
+  phr[(phrPtr - i)] := shiftBits           // hash[1:0] shifted in
+  phr[(phrPtr + i)] := hashHigh ^ phrLowBits  // hash[14:2] XOR'd in
+}
+```
+
+The phr buffer is folded directly without any additional hash mixing:
+
+```scala
+// Source: bpu/history/phr/Phr.scala:158-161
+s0_foldedPhr.getHistWithInfo(info).foldedHist :=
+  computeFoldedHist(phrValue, info.FoldedLength)(info.HistoryLength)
+// phrValue = raw phr circular buffer = accumulated path hash bits
+```
+
+### commonHR vs PHR in indexing
+
+For **TAGE** specifically, indexing/hash inputs are PC fields + **PHR folded history** only:
+- `setIdx` uses `foldedHist.forIdx` from PHR
+- `rawTag` uses `foldedHist.forTag` from PHR
+- no `commonHR` signal is connected into TAGE indexing/tag calculation
+
+```scala
+// Source: bpu/Bpu.scala:222-225
+tage.io.fromMainBtb.result             := mbtb.io.result
+tage.io.fromPhr.foldedPathHist         := phr.io.s0_foldedPhr
+tage.io.fromPhr.foldedPathHistForTrain := phr.io.trainFoldedPhr
+```
+
+`commonHR` is a separate history structure (`ghr`/`bw`) maintained by `CommonHR`, and is consumed by modules such as SC, not by TAGE index/tag hash:
+
+```scala
+// Source: bpu/Bpu.scala:235
+sc.io.commonHR := commonHR.io.s0_commonHR
+```
+
+### Index calculation summary
+
+| Field | Source | Formula | History used |
+|-------|--------|---------|--------------|
+| `bankIdx` | PC[2:1] | direct extraction | None |
+| `setIdx` | PC[11:3] XOR `forIdx` | `PC_setIdx ^ fold(PHR, min(histLen, 9))` | PHR folded to setIdx width |
+| `rawTag` | PC[24:12] XOR `forTag` | `PC_tag ^ (fold13 ^ (fold12 << 1))` | PHR folded to 13/12 bits |
+| `tag` (per branch) | `rawTag ^ cfiPosition` | rawTag XOR branch position in block | — |
+| `useAltOnNaIdx` | cfiPC[7:1] | direct extraction from branch PC | None |
+
+---
+
 ## Quality Checklist
 
 - [x] Comply with order 1.1~1.8
@@ -369,3 +522,4 @@ val valid = readPort.valid && !way.io.r.req.ready  // write only when SRAM read 
 - [x] latency/throughput quantification (2 cycle s0→s2, 1 pred-block/cycle)
 - [x] Specify stage input/output timing (s0 SRAM req → s1 resp → s2 output)
 - [x] Specify training trigger/FTQ storage/meta fields/port conflict processing
+- [x] indexing/hashing method specified (PC bit layout, fold widths per table, per-branch tag XOR)

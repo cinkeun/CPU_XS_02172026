@@ -247,14 +247,47 @@ replacer.predictTouch(setIdx, takenMask) // touch only taken entries
 
 - s0: SRAM read req sent
 - s1: SRAM read resp wait (1-cycle SRAM latency, holdRead=true)
-- s2: tag comparison, prediction slot output (`io.result`, `io.meta`)
-- s3: replacer touch (uses final takenMask)
+- s2: tag comparison, prediction slot output (`io.result`, `io.meta`); mbtb target available here
+- s3: final target Mux (mbtb / ITTage / RAS), replacer touch (uses final takenMask)
 - When s3_prediction becomes effective at BPU top: s3_fire
 
 ```scala
 // Source: mbtb/MainBtb.scala:54-60
 private val s0_fire, s1_fire, s2_fire, s3_fire = Wire(Bool())
 ```
+
+### Why final target Mux is at s3, not s2
+
+The final target MuxCase has three inputs:
+
+| Input | Available at | Reason |
+|-------|-------------|--------|
+| `mbtb target` | s2 | SRAM req s0 → resp s1 → tag cmp s2 |
+| `ras.io.topRetAddr` | s2 (any stage) | Combinational read from `timingTop` register; updated by *previous* s3 event, so always pre-computed |
+| `ittage.io.prediction.target` | **s3** | SRAM req sent at **s1** → resp s2 → latched to s3 |
+
+ITTage req is sent at s1, and the code has a TODO for power-saving gating:
+
+```scala
+// Source: bpu/ittage/Ittage.scala:85
+private val s1_isIndirect = true.B // (!s1_uftbHit && !io.fromFtb.s1_ftbCloseReq) || s1_uftbHasIndirect
+
+// Source: bpu/ittage/Ittage.scala:191
+t.io.req.valid := s1_fire && s1_isIndirect // TODO: s1_isIndirect for low power
+// s3_ittageTarget = RegEnable(s2_ittageTarget, s2_fire)  → output at s3
+```
+
+`s1_isIndirect` is currently hardcoded to `true.B` — **ITTage fires every cycle with no gating**. The commented-out logic shows the intended power-saving approach: gate SRAM reads on ubtb/abtb s1 hint (`s1_uftbHasIndirect`). This is a TODO, not yet implemented.
+
+However, implementing that gating naively creates a **SRAM read-enable timing problem**. The intended path would be:
+
+```
+[ubtb/abtb s1 output] → s1_uftbHasIndirect → s1_isIndirect → SRAM req.valid → SRAM internals
+```
+
+Placing combinational logic from another predictor's s1 output on the SRAM read enable is a long timing path — the SRAM read enable should ideally be driven by a registered signal, not a chain of combinational logic from ubtb/abtb. Moving the req to s0 speculatively would solve the timing issue but defeats the power-saving purpose (SRAM reads on every fetch block regardless of branch type). This tension between power and timing is why the TODO remains unresolved.
+
+RAS `topRetAddr` is a combinational read from the `timingTop` register (updated by the previous s3 event), so it is available at any stage including s2. It is consumed at s3 only to align with ITTage's output stage.
 
 ---
 
