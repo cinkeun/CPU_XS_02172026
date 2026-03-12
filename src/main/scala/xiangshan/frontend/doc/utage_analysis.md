@@ -63,7 +63,7 @@ NumTables:     Int = 2,
 UsefulWidth:   Int = 2,
 ```
 
-Based on `MicroTageInfo(NumSets, HistoryLength, TagWidth, HistBitsInTag)`:
+Based on `MicroTageInfo(NumSets, HistoryLength, HistBitsInTag, TagWidth)`:
 
 - **entries** array: `RegInit(VecInit(Seq.fill(numSets)(...)))` → synchronous register (FF-based, not SRAM)
 - **usefulEntries** array: stored separately
@@ -72,13 +72,14 @@ Based on `MicroTageInfo(NumSets, HistoryLength, TagWidth, HistBitsInTag)`:
 
 The second argument of `TableInfos` is `HistoryLength`.
 
-| Table | NumSets | HistoryLength | TagWidth | HistBitsInTag |
-|-------|---------|---------------|----------|---------------|
-| Table-0 | 512 | **9**  | 9  | 15 |
-| Table-1 | 512 | **16** | 12 | 16 |
+| Table | NumSets | HistoryLength (PHR bits) | HistBitsInTag | TagWidth | Taken branches covered |
+|-------|---------|--------------------------|---------------|----------|------------------------|
+| Table-0 | 512 | **6**  | 6  | 15 | 6 / 2 = **3** |
+| Table-1 | 512 | **12** | 6  | 15 | 12 / 2 = **6** |
 
-- MicroTage's current settings history length: **9 / 16**
-- Maximum history length (based on currently active table): **16**
+- `HistoryLength` = number of **PHR bits** used for index/tag hashing (not branch count)
+- Taken branches covered = `HistoryLength / Shamt` (Shamt=2 bits per taken branch)
+- Maximum history length (based on currently active table): **12 PHR bits = 6 taken branches**
 - `HistBitsInTag` is the number of history bits reflected when creating a tag, and has a different meaning from `HistoryLength`.
 
 ```scala
