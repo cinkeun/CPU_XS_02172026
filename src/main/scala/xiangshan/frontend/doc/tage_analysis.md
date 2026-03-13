@@ -509,6 +509,29 @@ sc.io.commonHR := commonHR.io.s0_commonHR
 | `tag` (per branch) | `rawTag ^ cfiPosition` | rawTag XOR branch position in block | — |
 | `useAltOnNaIdx` | cfiPC[7:1] | direct extraction from branch PC | None |
 
+### Multi-branch capacity constraint per fetch block
+
+`bankIdx = startPc[2:1]` — 같은 fetch block의 모든 branch는 동일한 startPc를 공유하므로, mBTB가 최대 8개 branch를 출력하더라도 **TAGE 내 모든 branch는 항상 같은 bank, 같은 setIdx로 인덱싱**된다.
+
+```scala
+// Source: bpu/tage/Tage.scala:77-79
+// currently all tables share the same bank index
+private val s0_bankIdx  = tables.head.getBankIndex(s0_startPc)  // startPc[2:1], 단 1개
+private val s0_bankMask = UIntToOH(s0_bankIdx, NumBanks)        // one-hot: 4개 bank 중 1개만 선택
+```
+
+s0에서 읽히는 것은 1개 bank × 1개 setIdx → `TableReadResp.entries: Vec[NumWays=2, TageEntry]` 딱 2개 entry다. s2에서 8개 branch 각각이 `rawTag ^ position`으로 이 **동일한 2개 entry**를 tag 비교한다.
+
+**결과적으로 TAGE가 한 fetch block에서 동시에 커버할 수 있는 branch는 테이블당 최대 2개(NumWays=2)**다. 3번째 이상의 branch는 구조적으로 TAGE miss가 보장되며, direction은 mBTB counter(base pred)로 fallback된다.
+
+**그럼에도 mBTB가 3번째 branch를 저장하는 이유:**
+
+- **branch 3이 실제로 의미를 갖는 조건**: branch 1, 2가 모두 not-taken으로 예측된 경우에만 branch 3의 direction이 최종 prediction에 영향을 줌. branch 1이 taken이면 branch 3은 실행 자체가 안 됨
+- **mBTB counter로 fallback**: TAGE miss여도 mBTB 2-bit saturating counter가 direction을 제공함. 정확도는 낮지만 동작은 유지됨
+- **target address 저장**: branch 3가 taken일 때의 jump target은 mBTB entry에만 저장됨. TAGE는 target을 저장하지 않음
+
+"fetch block 내 conditional branch 3개가 모두 not-taken인 루프"는 실제로 매우 드문 케이스이며, 이 경우의 TAGE 정확도 손실보다 NumWays 증가 비용이 크다고 판단한 설계 trade-off다.
+
 ---
 
 ## Quality Checklist
