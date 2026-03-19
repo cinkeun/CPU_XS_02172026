@@ -17,6 +17,8 @@ The final prediction of TAGE is the saturating counter sign in the provider tabl
 
 ```scala
 // Source: sc/Sc.scala:318-334
+// s2_providerCtr = io.providerTakenCtrs.map(_.bits)  ← TAGE provider의 takenCtr (prediction counter)
+// useful counter가 아님: tageConf는 "얼마나 강하게 taken/not-taken을 예측하는가"를 나타냄
 val tageConfHigh = s2_providerCtr(i).isSaturatePositive || s2_providerCtr(i).isSaturateNegative
 val tageConfMid  = s2_providerCtr(i).isMid
 val tageConfLow  = s2_providerCtr(i).isWeak
@@ -29,6 +31,10 @@ conf := aboveThreshold(sum, thres >> 1) // threshold ÷ 2 → difficult to inter
 conf := aboveThreshold(sum, thres >> 3) // threshold ÷ 8 → Easy intervention
 }
 ```
+
+**`tageConf`는 TAGE provider의 `takenCtr` (prediction counter) 기반이다.** useful counter가 아님.
+- `takenCtr`는 해당 entry가 방향을 얼마나 확신하는지를 나타냄 (saturated = 강한 확신, weak = 불확실)
+- useful counter는 "이 entry가 alt보다 맞았는가"를 나타내므로 confidence 판단에 사용되지 않음
 
 The weaker the TAGE (uncertainty), the lower the SC threshold, making it easier to override. If the TAGE is saturating (highly confident), the higher the threshold value, making it difficult for the SC to intervene.
 
@@ -61,9 +67,147 @@ val shouldUpdate = writeValid && ...
 (t1_meta.tagePred(branchIdx) =/= t1_meta.scPred(branchIdx)) && // only when SC is different from TAGE
   (scWrong || !t1_meta.sumAboveThres(branchIdx))
 prevThres.getUpdate(scWrong, en = shouldUpdate)
-// If SC is wrong → threshold increases (intervene only when more confident)
-// If SC is correct but sum is below threshold → Decrease threshold (intervene more frequently)
+// scWrong=true  → threshold 증가 (SC가 틀렸으니 더 높은 sum이 필요)
+// scWrong=false → threshold 감소 (SC가 맞지만 sum < threshold → bar 낮춰 더 자주 개입)
 ```
+
+**`scThreshold`는 총 8개 레지스터 (per way-slot)**
+```scala
+// Source: sc/Sc.scala:78
+val scThreshold = RegInit(VecInit.tabulate(NumWays)(_ => ThresholdCounter.Init))
+// NumWays = NumBtbResultEntries = 4 × 2 = 8
+// SRAM이 아닌 단순 레지스터 8개. PC/tag/set 차원 없음.
+val thres = s2_thresholds(s2_wayIdx(i))  // fetch packet 내 branch slot 위치로만 인덱싱
+```
+
+- **PC-specific하지 않음**: 서로 다른 PC의 branch들이 같은 way-slot에 들어오면 동일한 threshold를 공유
+- **Global하지도 않음**: 8개의 slot별로 독립적으로 학습 (slot 0은 slot 0의 branch들만의 SC 정확도를 반영)
+
+**설계 배경 (Seznec TAGE-SC-L)**
+
+Seznec의 원본 SC 논문에서 threshold는 **단 1개의 global value**였다. XiangShan은 이를 per-way-slot 8개로 세분화한 것으로, 원본보다 fine-grained하지만 여전히 per-PC는 아니다.
+
+핵심 논거: threshold는 "SC가 TAGE를 override하려면 얼마나 강한 evidence가 필요한가"라는 **meta-level** 통계다. PC-specificity는 SC table entry(PathTable, BiasTable)가 이미 담당하므로, threshold 자체는 global/coarse-grained으로도 충분하다는 것이 Seznec의 주장.
+
+**Pollution 문제 (미확인 trade-off)**
+
+> 유저 지적: 서로 다른 PC가 같은 way-slot을 공유하면, 각 PC의 threshold 요구사항이 섞여 pollute될 수 있다.
+
+- 이론적으로는 real trade-off: hard-to-predict branch A가 threshold를 높이면, 같은 slot의 easy-to-correct branch B도 높은 threshold를 받음
+- Seznec의 반론: hard-to-predict branch들은 threshold 요구사항이 통계적으로 유사한 경향이 있음
+- 실제 영향은 workload-dependent하며, 코드 레벨에서는 확인 불가 — **논문/시뮬레이션 수준에서 추가 확인 필요**
+
+### Critical example: TAGE weakTaken + biasTable correction
+
+The scenario below is where SC fires most decisively.
+
+```
+PC_B: blt  x1, x2, HANDLE   // inside validate()
+```
+
+**PHR aliasing 발생 구조**
+
+```c
+// Hot loop A (10,000 iters): data_a[] 값이 limit보다 거의 항상 크다 → NotTaken 90%
+for (int i = 0; i < 10000; i++) {
+    validate(data_a[i], limit);   // call site A, PC = 0x8000_0100
+}
+
+// Hot loop B (4,000 iters): data_b[] 값이 limit보다 거의 항상 작다 → Taken 85%
+for (int i = 0; i < 4000; i++) {
+    validate(data_b[i], limit);   // call site B, PC = 0x8000_0500
+}
+
+bool validate(int val, int limit) {
+    if (val < limit) {   // Branch at PC_B = 0x8000_1000
+        handle(val);
+    }
+}
+```
+
+TAGE index = `(PC_B_high) ^ fold(PHR, histLen)`. 두 call site는 PC가 다르지만 PHR folding 결과가 같을 수 있다:
+
+```
+Loop A → PHR when at PC_B: [0x8000_0100, prev_targets...]
+  fold(PHR_A, hist=8) = 0x3A
+
+Loop B → PHR when at PC_B: [0x8000_0500, prev_targets...]
+  fold(PHR_B, hist=8) = 0x3A   ← PHR aliasing: 다른 경로인데 fold 값이 같음
+
+→ 두 context가 TAGE의 같은 entry (SLOT_K)를 공유
+```
+
+SLOT_K의 학습 결과:
+- Loop A: 10000 × 90% NotTaken = 9000 Not, 1000 Taken
+- Loop B: 4000 × 85% Taken = 600 Not, 3400 Taken
+- 합산: **9600 NotTaken, 4400 Taken**
+
+Counter는 대체로 NotTaken 쪽이지만, Loop B가 연속으로 실행되면 counter가 +1(weakTaken)으로 밀려나는 순간들이 발생한다.
+
+**TAGE = weakTaken (+1)인 순간**:
+
+Loop B의 연속 Taken으로 counter가 +1로 올라간 직후, 다음 predict 대상이 Loop A일 경우:
+
+```
+provider SLOT_K: ctr = +1 (weakTaken)
+tagePred = Taken   ← 실제는 NotTaken (Loop A 확률 90%)
+tageConfHigh = false, tageConfLow = true
+```
+
+**BiasTable이 학습한 것**:
+
+BiasTable은 history 없이 PC_B만으로 인덱싱하므로, "PC_B에서 TAGE가 weakTaken을 예측했을 때 실제 결과"를 누적한다. SLOT_K = +1 상태는 Loop B 직후에 빈번하므로, 이 시점의 실제 결과는 Loop A의 NotTaken이 많다:
+
+```
+BiasTable[PC_B, isWeak=1, taken=1] → ctr ≈ -5 (NotTaken bias 학습 완료)
+```
+
+**Step 1 — TAGE prediction (s2)**
+
+```
+provider table hit: ctr = +1 (weakTaken)
+tagePred = Taken
+tageConfHigh = false, tageConfLow = true   // weak counter
+```
+
+**Step 2 — SC sum accumulation (s2)**
+
+`biasTable` index = `Cat(wayIdx, isWeak=1, taken=1)`
+— the table has learned that "when TAGE predicts weakly-taken for PC_A, the actual outcome is not-taken ~70% of the time":
+
+```
+biasTable  ctr = -6  (strong not-taken bias)
+pathTable  ctr = -2  (call path also votes not-taken)
+sum = -8
+```
+
+**Step 3 — threshold comparison**
+
+```scala
+// Source: sc/Sc.scala:323-329
+when(hit && valid && tageConfLow) {
+  conf := aboveThreshold(sum, thres >> 3)  // threshold ÷ 8 → easy to intervene
+}
+// if thres = 8, effective threshold = 1
+// |sum| = 8 ≥ 1 → conf = true
+```
+
+**Step 4 — override**
+
+```scala
+// Source: sc/Sc.scala:338-342
+val finalPred = Mux(conf, !tagePred, tagePred)
+// conf=true, tagePred=Taken → finalPred = NotTaken  ← SC flips the prediction
+```
+
+**Result**
+
+| | TAGE only | TAGE + SC |
+|---|---|---|
+| prediction | Taken (wrong) | **NotTaken (correct)** |
+| root cause | weakTaken accumulated via GHR aliasing | biasTable learned "(weakTaken → actually NotTaken)" pattern |
+
+**Key point**: SC intervention is gated on `tageConfLow`. When the TAGE provider is saturated, the effective threshold is `thres >> 1` — much harder to cross — so SC stays silent. SC's role is precision correction specifically in the low-confidence region of TAGE.
 
 ---
 
@@ -114,15 +258,15 @@ case class ScParameters(
 
 ### Memory specification table
 
-| Table | Size (sets) | Width (bits) | #Tables | Banks | Read Ports | Write Ports | Enable |
-|-------|------------|--------------|---------|-------|------------|-------------|--------|
-| PathTable[0] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank (via WriteBuffer) | **true** |
-| PathTable[1] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank | **true** |
-| GlobalTable[0] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank | false |
-| GlobalTable[1] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank | false |
-| BWTable[0] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank | false |
-| BWTable[1] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank | false |
-| BiasTable | 128 | 6×32=192 per row | 1 | 2 | 1 per bank | 1 per bank | **true** |
+| Table | Size (sets) | Width (bits) | #Tables | Banks | Read Ports | Write Ports | Enable | Detection Example |
+|-------|------------|--------------|---------|-------|------------|-------------|--------|-------------------|
+| PathTable[0] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank (via WriteBuffer) | **true** | `A()→[branch]` vs `C()→[branch]`: branch inside the same function is consistently NotTaken when called from A, Taken when called from C — 1-hop call-site bias, captured within hist=8 |
+| PathTable[1] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank | **true** | `A()→B()→[branch]` vs `C()→B()→[branch]`: branch inside B() changes direction depending on who called B() — 2-hop chain, requires hist=16 to distinguish the deeper caller |
+| GlobalTable[0] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank | false | `if(x) { … if(y) … }`: inner branch strongly correlated with outer branch result ≤8 steps back in GHR (short inter-branch correlation) |
+| GlobalTable[1] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank | false | Early guard check → late branch: a branch at the bottom of a function is correlated with a guard branch 9–16 branches earlier in GHR |
+| BWTable[0] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank | false | 4-iteration inner loop: exit branch taken only on 4th iteration — short backward history (≤4) is sufficient to reveal the loop-exit pattern |
+| BWTable[1] | 128 | 6×8=48 per row | 1 | 2 | 1 per bank | 1 per bank | false | 8-iteration loop or 2×4 nested loop: loop-exit branch requires up to 8 backward steps to distinguish the last iteration from earlier ones |
+| BiasTable | 128 | 6×32=192 per row | 1 | 2 | 1 per bank | 1 per bank | **true** | TAGE accumulates `weakTaken(+1)` for a branch that is actually NotTaken ~70% of the time due to path history (PHR) aliasing. BiasTable slot `(PC, isWeak=1, taken=1)` learns the systematic flip and overrides TAGE |
 
 > `singlePort = true`: Each bank has one physical read/write port. read first.
 
@@ -241,8 +385,20 @@ class SignedSaturateCounter(width: Int) extends Bundle {
 ```scala
 // Source: sc/Helpers.scala:61
 def getPercsum(ctr: SInt): SInt = Cat(ctr, 1.U(1.W)).asSInt
-// Expand the ctr value by 2 times + 1 and add it (remove center bias)
+// = ctr * 2 + 1
+// CtrWidth=6 → ctr 범위 [-32, 31] → percsum 범위 [-63, 63]
 ```
+
+| ctr value | percsum (ctr*2+1) | 상태 |
+|---|---|---|
+| +31 | +63 | saturate Taken |
+| +1 ~ +30 | +3 ~ +61 | mid Taken |
+| 0 | +1 | weak Taken (WeakPositive) |
+| -1 | -1 | weak NotTaken (WeakNegative) |
+| -2 ~ -31 | -3 ~ -61 | mid NotTaken |
+| -32 | -63 | saturate NotTaken |
+
+ctr=0(percsum=+1)과 ctr=-1(percsum=-1) 사이에 percsum=0이 존재하지 않는다. 모든 entry가 반드시 ±1 이상의 투표를 하며 dead zone이 없다.
 
 ### BiasTable Indexing
 
@@ -459,28 +615,96 @@ private val s2_commonHR = RegEnable(s1_commonHR, s1_fire)
 - FTQ resolve → `t0_fire` (= `io.stageCtrl.t0_fire`)
 - t1: `t1_train = RegEnable(io.train, t0_fire)` → Process after 1 cycle delay
 
-### Training conditions
+### SC Table entry 업데이트 조건
 
 ```scala
-// Source: sc/Helpers.scala:84
+// Source: sc/Helpers.scala:84-85
 val needUpdate = writeValid && writeWayIdx === wayIdx &&
   metaData.tagePredValid(branchIdx) &&
-  (metaData.scPred(branchIdx) =/= writeTaken || !metaData.sumAboveThres(branchIdx))
-// Condition: When the TAGE provider is valid and the SC prediction is incorrect or the SC sum is below the threshold
+  (metaData.scPred(branchIdx) =/= writeTaken   // ① SC가 틀렸다
+   || !metaData.sumAboveThres(branchIdx))       // ② sum이 threshold 미달
+// → ctr을 actual taken 방향으로 ±1
 ```
 
-### Threshold update conditions
+조건을 만족하면 모든 SC table (PathTable, GlobalTable, BWTable, BiasTable)의 해당 entry ctr을 actual taken 방향으로 `getUpdate(writeTaken)` 적용.
+
+| 케이스 | 조건 | 동작 | 이유 |
+|---|---|---|---|
+| ① SC 틀림 | `scPred ≠ actual` | ctr → actual 방향 | 잘못된 방향 수정 |
+| ② sum 미달 | `!sumAboveThres` | ctr → actual 방향 | SC가 override 안 했어도 evidence 축적 |
+
+**케이스 ②**: SC가 threshold를 못 넘어 override하지 못했더라도 (TAGE가 맞았든 틀렸든) 계속 학습한다. 다음 번에 더 강한 sum을 만들기 위해서. TAGE와 SC가 같은 예측을 했을 때도 조건 ①②가 맞으면 학습한다.
+
+### Threshold 구조
 
 ```scala
-// Source: sc/Sc.scala:452-456
-val shouldUpdate = writeValid && writeWayIdx === wayIdx &&
-  metaData.tagePredValid(branchIdx) &&
-  (metaData.tagePred(branchIdx) =/= metaData.scPred(branchIdx)) &&
-  (scWrong || !metaData.sumAboveThres(branchIdx))
-prevThres.getUpdate(scWrong, en = shouldUpdate)
-// scWrong=true → reduce threshold (use SC more often)
-// scWrong=false → increase threshold (more rarely use SC)
+// Source: sc/Sc.scala:78, sc/Parameters.scala:42-43
+val scThreshold = RegInit(VecInit.tabulate(NumWays)(_ => ThresholdCounter.Init))
+// ThresholdCounter: SaturateCounter (unsigned), width=12, init=720
+// 범위: [0, 4095]  (unsigned)
 ```
+
+예측 시 실제 사용 값:
+
+```scala
+// Source: sc/Sc.scala:309, 317
+val s2_thresholds = scThreshold.map(_.value >> 3)   // base threshold = value >> 3
+val thres = s2_thresholds(wayIdx)
+```
+
+| tageConf | 비교 threshold | 공식 | init(720) 기준 |
+|---|---|---|---|
+| tageConfHigh (saturate) | `thres >> 1` | `value >> 4` | 720 >> 4 = **45** |
+| tageConfMid | `thres >> 2` | `value >> 5` | 720 >> 5 = **22** |
+| tageConfLow (weak) | `thres >> 3` | `value >> 6` | 720 >> 6 = **11** |
+| sumAboveThres (training용) | `thres` | `value >> 3` | 720 >> 3 = **90** |
+
+```scala
+// Source: sc/Helpers.scala:63-64
+def aboveThreshold(scSum: SInt, threshold: UInt): Bool =
+  (scSum > threshold.zext) && pos(scSum) ||
+  (scSum < -threshold.zext) && neg(scSum)
+// 즉 |sum| > threshold (부호 방향 일치 포함)
+```
+
+### Threshold 업데이트 조건
+
+```scala
+// Source: sc/Sc.scala:451-456
+val scWrong    = taken =/= t1_meta.scPred(branchIdx)
+val shouldUpdate = writeValid && writeWayIdx === wayIdx &&
+  t1_meta.tagePredValid(branchIdx) &&
+  (t1_meta.tagePred(branchIdx) =/= t1_meta.scPred(branchIdx)) &&  // SC와 TAGE가 달랐을 때만
+  (scWrong || !t1_meta.sumAboveThres(branchIdx))
+prevThres.getUpdate(scWrong, en = shouldUpdate)
+// ThresholdCounter(unsigned): scWrong=true → +1 (증가), false → -1 (감소)
+```
+
+table 조건과의 차이: **`tagePred ≠ scPred`** 조건이 추가됨. TAGE와 SC가 같은 방향을 예측했을 때는 threshold를 건드리지 않는다.
+
+| 케이스 | 조건 | threshold | 이유 |
+|---|---|---|---|
+| SC가 override 후 틀림 | `tagePred≠scPred` AND `scWrong=true` AND `sumAboveThres` | **증가** | SC가 틀린 override → 더 보수적으로 |
+| SC가 맞지만 sum 미달로 override 못함 | `tagePred≠scPred` AND `scWrong=false` AND `!sumAboveThres` | **감소** | SC가 맞지만 bar가 너무 높았음 |
+| SC가 override 후 맞음 | `tagePred≠scPred` AND `scWrong=false` AND `sumAboveThres` | **변화 없음** | shouldUpdate = false |
+
+### 두 조건의 관계
+
+```
+branch retired (actual taken 확인)
+        │
+        ├─ tagePredValid?  No → 아무것도 안 함
+        │
+        Yes
+        ├─ [SC table update]  tagePredValid AND (scPred≠actual OR !sumAboveThres)
+        │    → 모든 table의 해당 entry ctr을 actual 방향으로 ±1
+        │
+        └─ [Threshold update]  tagePredValid AND tagePred≠scPred AND (scWrong OR !sumAboveThres)
+             → threshold를 scWrong 방향으로 ±1
+             (TAGE와 SC가 동일 예측이면 threshold 불변)
+```
+
+**요약**: table은 "방향이 맞는지"를 학습하고, threshold는 "SC가 override해도 되는 강도"를 학습한다.
 
 ### FTQ Archive Information
 
