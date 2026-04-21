@@ -1,1260 +1,1142 @@
-# XiangShan Instruction Cache (ICache) — Deep Dive Analysis
+# XiangShan ICache 분석 문서
 
-> **Reading Level Note:** This document is written to be understandable even if you have never seen a CPU before. Every concept is explained from scratch with simple analogies before the technical detail.
+이 문서는 XiangShan 프론트엔드의 Instruction Cache(ICache)를 코드 기준으로 다시 설명한 문서다.  
+기존 설명처럼 비유를 길게 끌기보다, 실제 구현이 어떤 모듈로 나뉘어 있고 요청이 어떤 순서로 흐르는지에 집중한다.
 
----
+문서를 읽을 때 가장 먼저 잡아야 할 핵심은 아래 두 가지다.
 
-## Table of Contents
+1. `prefetch pipe`가 **TLB 결과와 meta lookup 결과를 미리 계산해서 `WayLookup`에 적어 둔다.**
+2. `main pipe`는 **그 결과를 받아 data array만 읽고**, 부족한 경우에만 `MissUnit`에 refill을 요청한다.
 
-1. [What Is a Cache? (The Big Picture)](#1-what-is-a-cache-the-big-picture)
-2. [ICache Top-Level Structure](#2-icache-top-level-structure)
-3. [How Instructions Are Stored — Sets, Ways, and Cache Lines](#3-how-instructions-are-stored--sets-ways-and-cache-lines)
-4. [Address Decoding — Finding the Right Shelf](#4-address-decoding--finding-the-right-shelf)
-5. [Meta Array — The Label System](#5-meta-array--the-label-system)
-6. [Data Array — The Storage Shelves](#6-data-array--the-storage-shelves)
-7. [The Main Pipeline — Fetching Instructions](#7-the-main-pipeline--fetching-instructions)
-8. [Cache Hits and Misses](#8-cache-hits-and-misses)
-9. [Miss Unit and MSHRs — The Emergency Errand System](#9-miss-unit-and-mshrs--the-emergency-errand-system)
-10. [Replacement Policy — Deciding What to Throw Away](#10-replacement-policy--deciding-what-to-throw-away)
-11. [WayLookup Buffer — The Cheat Sheet](#11-waylookup-buffer--the-cheat-sheet)
-12. [The Prefetcher — The Psychic Helper](#12-the-prefetcher--the-psychic-helper)
-13. [ECC — Catching Corrupted Data](#13-ecc--catching-corrupted-data)
-14. [Performance Counters and Monitoring](#14-performance-counters-and-monitoring)
-15. [Key Parameters Reference](#15-key-parameters-reference)
-16. [Data Flow Diagram — Everything Together](#16-data-flow-diagram--everything-together)
+즉, 이 ICache의 빠른 경로는 "main pipe가 매번 meta array와 iTLB를 직접 때리는 구조"가 아니라,  
+"prefetch pipe가 앞에서 준비해 둔 정보를 main pipe가 소비하는 구조"로 이해하는 편이 맞다.
 
 ---
 
-## 1. What Is a Cache? (The Big Picture)
+## 1. 먼저 전체 그림부터
 
-### The Library Analogy
+관련 파일:
 
-Imagine you are doing homework and need to read many books. Your school library is huge but far away — it takes a long time to go there and come back. To save time, you bring a small stack of your most-used books to your desk. Your desk is your **cache**.
+- `src/main/scala/xiangshan/frontend/icache/ICacheMainPipe.scala`
+- `src/main/scala/xiangshan/frontend/icache/ICachePrefetchPipe.scala`
+- `src/main/scala/xiangshan/frontend/icache/ICacheMissUnit.scala`
+- `src/main/scala/xiangshan/frontend/icache/ICacheWayLookup.scala`
+- `src/main/scala/xiangshan/frontend/icache/ICacheMetaArray.scala`
+- `src/main/scala/xiangshan/frontend/icache/ICacheDataArray.scala`
 
-- **Library** = Main memory (DRAM) — huge, slow
-- **Desk** = Cache — small, fast
-- **Books on your desk** = Cached instructions/data
+ICache는 크게 아래 블록으로 나뉜다.
 
-A CPU (the brain of a computer) must read **instructions** (its "to-do list") from memory constantly. Every time it needs the next instruction, going all the way to main memory would be painfully slow. The **Instruction Cache (ICache)** is the CPU's personal desk: it keeps recently-used instructions close by so they can be read in just one or two clock cycles instead of hundreds.
+| 블록 | 역할 | 핵심 포인트 |
+| --- | --- | --- |
+| `ICachePrefetchPipe` | 미래 fetch 주소를 미리 살펴봄 | iTLB + meta read 수행 후 `WayLookup`에 기록 |
+| `ICacheWayLookup` | prefetch 결과를 임시 저장 | main pipe가 바로 읽을 수 있도록 큐 형태로 유지 |
+| `ICacheMainPipe` | 실제 fetch 요청 처리 | `WayLookup` 결과를 이용해 data array read |
+| `ICacheMetaArray` | tag / `maybeRvcMap` / meta ECC 저장 | prefetch pipe가 읽고, miss refill이 씀 |
+| `ICacheDataArray` | 실제 instruction bytes 저장 | main pipe가 읽고, miss refill이 씀 |
+| `ICacheMissUnit` | miss 요청 수집 및 L2 refill 처리 | MSHR 관리, TileLink 요청, meta/data writeback |
+| `ICacheReplacer` | victim way 선택 | refill 시 어떤 way를 덮어쓸지 결정 |
 
-### Why a Separate Instruction Cache?
+요청 흐름을 한 줄로 요약하면 다음과 같다.
 
-Instructions and data (like numbers you add together) have different access patterns. Instructions are usually read **sequentially** — one after another — and often re-read when a loop repeats. Having a dedicated ICache optimized for this pattern is faster than sharing a single cache.
+```text
+FTQ prefetch request
+  -> PrefetchPipe
+  -> iTLB + MetaArray read
+  -> WayLookup enqueue
+
+FTQ fetch request
+  -> MainPipe
+  -> WayLookup dequeue
+  -> DataArray read
+  -> hit면 IFU 응답
+  -> miss면 MissUnit 요청
+  -> refill 오면 응답 + SRAM write
+```
 
 ---
 
-## 2. ICache Top-Level Structure
+## 2. 파라미터와 저장 구조
 
-**Source file:** [icache/ICache.scala](../icache/ICache.scala), [icache/ICacheImp.scala](../icache/ICacheImp.scala)
+관련 파일:
 
-Think of the ICache as a small organization. It has several departments that work together:
+- `src/main/scala/xiangshan/frontend/icache/Parameters.scala`
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         ICache                               │
-│                                                              │
-│  ┌───────────────────┐    ┌────────────────────────────┐    │
-│  │  ICacheMainPipe   │    │    ICachePrefetchPipe       │    │
-│  │  (Fetch highway) │    │    (Prediction highway)     │    │
-│  └────────┬──────────┘    └──────────────┬─────────────┘    │
-│           │                              │                   │
-│  ┌────────▼──────────────────────────────▼──────────────┐   │
-│  │              ICacheMissUnit                           │   │
-│  │  (Emergency runner to L2 cache)                      │   │
-│  │  4 Fetch MSHRs  +  10 Prefetch MSHRs                 │   │
-│  └───────────────────────────────────────────────────────┘   │
-│                                                              │
-│  ┌─────────────────────┐  ┌────────────────────────────┐    │
-│  │   ICacheMetaArray   │  │     ICacheDataArray        │    │
-│  │   (Tag labels)      │  │     (Instruction storage)  │    │
-│  └─────────────────────┘  └────────────────────────────┘    │
-│                                                              │
-│  ┌─────────────────────┐  ┌────────────────────────────┐    │
-│  │   ICacheReplacer    │  │     ICacheWayLookup        │    │
-│  │   (Eviction policy) │  │     (Prefetch cheat sheet) │    │
-│  └─────────────────────┘  └────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
+기본 파라미터는 다음과 같다.
+
+| 항목 | 값 | 의미 |
+| --- | --- | --- |
+| `nSets` | 256 | set 개수 |
+| `nWays` | 4 | 4-way set associative |
+| `blockBytes` | 64 | cache line 크기 |
+| `rowBits` | 64 | data bank 1개의 폭은 64bit = 8B |
+| `PortNumber` | 2 | 연속된 두 cache line까지 동시에 다룰 수 있게 만든 포트 수 |
+| `WayLookupSize` | 32 | prefetch 결과를 저장하는 큐 깊이 |
+| `NumFetchMshr` | 4 | fetch miss용 MSHR |
+| `NumPrefetchMshr` | 10 | prefetch miss용 MSHR |
+| `NumInterleavedBank` | 2 | meta array interleaving bank 수 |
+| `MetaWaySplit` | 2 | meta SRAM을 way 방향으로 둘로 나눔 |
+
+총 용량은 다음과 같다.
+
+```text
+256 sets * 4 ways * 64 bytes = 64 KiB
 ```
 
-| Module | Role | Analogy |
-|---|---|---|
-| `ICacheMainPipe` | Processes actual fetch requests from FTQ | The main checkout counter at a store |
-| `ICachePrefetchPipe` | Speculatively fetches instructions before they're needed | A helpful assistant who pre-stocks shelves |
-| `ICacheMissUnit` | Handles cache misses, communicates with L2 | Sends an errand runner to the library |
-| `ICacheMetaArray` | Stores tag labels for each cached line | Index cards at the front of each shelf |
-| `ICacheDataArray` | Stores the actual instruction bytes | The actual books on the shelves |
-| `ICacheReplacer` | Decides which line to evict when full | The librarian who decides which book to remove |
-| `ICacheWayLookup` | Queues prefetch results for the main pipe | A sticky-note system passed between helpers |
+여기서 `PortNumber = 2`를 "완전히 독립된 fetch 두 개를 동시에 처리한다"라고 이해하면 약간 틀린다.  
+이 설계에서 port 0과 port 1은 보통 **한 fetch block이 두 cache line에 걸칠 때 그 두 line을 함께 다루기 위한 포트**다.
 
-### TileLink — The Road to L2
+즉:
 
-The ICache communicates with the Level-2 (L2) cache using the **TileLink** protocol — a standardized "language" for cache-to-cache communication. When an instruction is not in the ICache, the `ICacheMissUnit` sends a `Get` message over TileLink to retrieve the missing cache line from L2.
+- port 0: 현재 fetch가 시작되는 첫 번째 cache line
+- port 1: cross-line이면 다음 cache line
 
 ---
 
-## 3. How Instructions Are Stored — Sets, Ways, and Cache Lines
+## 3. 주소가 어떻게 나뉘는가
 
-**Source file:** [icache/Parameters.scala](../icache/Parameters.scala)
+관련 파일:
 
-### The Bookshelf Analogy Upgraded
+- `src/main/scala/xiangshan/frontend/icache/Helpers.scala`
+- `src/main/scala/xiangshan/frontend/icache/Parameters.scala`
 
-Imagine a bookshelf with **256 rows** (called **sets**) and **4 columns** (called **ways**). Each cell in the shelf holds one **cache line** — a fixed-size block of 64 bytes (512 bits) of instructions.
+ICache는 VIPT 성격의 경로를 가진다.  
+set index는 virtual address에서 바로 얻고, hit 판정에 필요한 tag는 iTLB를 거친 physical tag를 사용한다.
 
+주소를 크게 나누면 이렇게 볼 수 있다.
+
+```text
+physical block address = [ pTag | vSetIdx | blockOffset ]
+
+vSetIdx      : 어떤 set을 볼지 결정
+blockOffset  : cache line 안에서 어느 byte/bank가 필요한지 결정
+pTag         : 해당 set 안의 어느 way가 맞는지 판정
 ```
-         Way 0     Way 1     Way 2     Way 3
-        ┌────────┬─────────┬────────┬────────┐
-Set 0   │ Line A │ Line B  │ Line C │ Line D │
-Set 1   │ Line E │  (empty)│ Line F │ Line G │
-Set 2   │  (empty)│ Line H │ Line I │ Line J │
-  ...   │  ...   │  ...    │  ...   │  ...   │
-Set 255 │ Line K │ Line L  │ Line M │ Line N │
-        └────────┴─────────┴────────┴────────┘
-```
 
-- **Set** = A row. The CPU uses bits from the memory address to pick which row to look in.
-- **Way** = A column. Multiple items can be stored in the same row (they have different tags).
-- **Cache Line** = One cell. Always 64 bytes. Instructions are packed into these 64-byte chunks.
+코드 기준 helper는 다음과 같다.
 
-### Key Numbers (Default Configuration)
+- `get_idx(vAddr)`: set index 추출
+- `get_phy_tag(pAddr)`: physical tag 추출
+- `getBlkAddrFromPTag(vAddr, pTag)`: refill 요청용 block address 구성
+- `getPAddrFromPTag(vAddr, pTag)`: 응답용 physical address 구성
+- `getBankIdx(blkOffset)`: data bank index 계산
 
-| Parameter | Value | Meaning |
-|---|---|---|
-| `nSets` | 256 | 256 rows in the shelf |
-| `nWays` | 4 | 4 columns (4-way set-associative) |
-| `blockBytes` | 64 | Each cell = 64 bytes |
-| Total capacity | 256 × 4 × 64 = 64 KB | Total instruction cache size |
-
-### Two Ports
-
-The ICache has **2 ports** (`PortNumber = 2`). This means it can service two fetch requests at the same time — like having two checkout lanes at a grocery store. The two ports access **different sets** (the sets are split: even sets go to port 0, odd sets go to port 1).
+중요한 점은 `waymask`가 주소에서 직접 나오지 않는다는 것이다.  
+`waymask`는 prefetch pipe가 meta array를 읽고 `pTag`를 비교한 뒤 만들어 낸 결과다.
 
 ---
 
-## 4. Address Decoding — Finding the Right Shelf
+## 4. Meta Array는 무엇을 저장하는가
 
-When the CPU wants instructions at address `X`, it must figure out which shelf row to look at and which label to check. This is done by splitting the address into parts.
+관련 파일:
 
-### Virtual vs. Physical Addresses
+- `src/main/scala/xiangshan/frontend/icache/ICacheMetaArray.scala`
+- `src/main/scala/xiangshan/frontend/icache/ICacheMetaInterleavedBank.scala`
+- `src/main/scala/xiangshan/frontend/icache/Bundles.scala`
 
-The CPU programs use **virtual addresses** (like a room number in your school). The actual memory hardware uses **physical addresses** (the GPS coordinates of that room). A special unit called the **iTLB** (Instruction Translation Lookaside Buffer) translates between them. This translation happens in the prefetch pipe's Stage 0.
+meta entry에는 대략 다음 정보가 들어 있다.
 
-### Address Bit Breakdown
+| 필드 | 의미 |
+| --- | --- |
+| `phyTag` | hit 판정을 위한 physical tag |
+| `maybeRvcMap` | 각 instruction slot이 압축 명령어일 수 있는지에 대한 힌트 |
+| `code` | meta ECC/parity |
 
-```
-Virtual Address (64-bit):
- ┌──────────┬──────────────┬──────────────┬──────────────────────┐
- │  (upper) │  vSetIdx     │  bankIdx     │  rowOffset + byteOff │
- │          │  [13:6]      │  [5:3]       │  [2:0]               │
- │          │  8 bits      │  3 bits      │  3 bits              │
- │          │  → set (row) │  → data bank │  → byte within bank  │
- └──────────┴──────────────┴──────────────┴──────────────────────┘
-                                ↑
-                       blockOffset [5:0] = bankIdx[5:3] + byteOffset[2:0]
+유효 비트는 SRAM 안이 아니라 `validArray` 레지스터로 따로 관리된다.
 
-Physical Address (used for tag comparison):
- ┌──────────────────────────────────┬─────────────────┬──────────────┐
- │  pTag                            │  idx            │ blockOffset  │
- │  bits [PAddrBits-1 : pgUntagBits]│  [13:6]         │  [5:0]       │
- │  → the "name" of this line       │  → which set    │  byte offset │
- └──────────────────────────────────┴─────────────────┴──────────────┘
+```scala
+private val validArray = RegInit(VecInit.fill(NumInterleavedSet)(0.U(nWays.W)))
 ```
 
-| Field | Bits | Width | Usage |
-|---|---|---|---|
-| `vSetIdx` | [13:6] | 8 bits | Selects 1 of 256 sets (rows) — **same** for virtual and physical |
-| `bankIdx` | [5:3] | 3 bits | Selects 1 of 8 data banks within a cache line |
-| `byteOffset` | [2:0] | 3 bits | Byte offset within an 8-byte bank row |
-| `pTag` | [PAddrBits-1:14] | varies | Physical tag for hit/miss comparison |
+이 구조의 의미는 다음과 같다.
 
-**Interleaved bank index for Meta Array:**
-```
-MetaBankIdx  = vSetIdx[0]     → which interleaved meta bank (0 or 1)
-MetaRowIdx   = vSetIdx[7:1]   → row within that bank (0..127)
+1. meta SRAM에는 태그와 부가 정보가 저장된다.
+2. 실제로 그 way가 valid한지는 별도 valid bit 배열이 판단한다.
+3. `flush`나 `fence.i`는 주로 이 valid bit를 지우는 방식으로 동작한다.
+
+### 4.0 MetaArray 접근 패턴 요약
+
+혼동하기 쉬운 부분이므로 먼저 정리한다.
+
+| 포트 | 연결 대상 | 역할 |
+| --- | --- | --- |
+| `.read` | **prefetch pipe 전용** | pTag 조회 — hit/miss 판정용 |
+| `.write` | **refill (missUnit) 전용** | L2에서 받아온 pTag를 SRAM에 저장 |
+| `.flush` | main pipe (ECC 오류 후) | 해당 way의 validArray 비트를 클리어 |
+| `.flushAll` | fencei | 전체 validArray 클리어 |
+
+**핵심:**
+
+- **prefetch pipe** → MetaArray를 **읽는다** (write 아님)
+- **refill** → MetaArray를 **쓴다** — L2 fetch 완료 후 pTag를 저장해야 이후 prefetch에서 hit이 잡힘
+- **main pipe** → MetaArray를 직접 **읽지 않는다** — WayLookup에서 prefetch 결과를 받아 씀
+
+### 4.1 interleaving이 왜 필요한가
+
+meta array는 `NumInterleavedBank = 2`로 나뉜다.  
+연속된 두 set을 동시에 다룰 수 있게 하려는 목적이다.
+
+예를 들어:
+
+```text
+set 0 -> bank 0
+set 1 -> bank 1
+set 2 -> bank 0
+set 3 -> bank 1
 ```
 
-- **`vSetIdx`** (8 bits) — Selects 1 of 256 sets. Since log₂(256) = 8, 8 bits are needed.
-- **`bankIdx`** (3 bits, = `blockOffset[5:3]`) — Selects 1 of 8 data banks. Computed by `getBankIdx()` in [Helpers.scala](../icache/Helpers.scala).
-- **`pTag`** — The "name badge" stored alongside each way. During lookup, the CPU compares this against the incoming physical address tag.
+이렇게 두면 cross-line fetch처럼 연속된 두 line을 같이 볼 때 bank conflict를 줄일 수 있다.
+
+### 4.2 MetaArray의 실제 input과 arbitration
+
+MetaArray(`ICacheImp.scala`)에 연결된 input은 다음 4개다.
+
+```scala
+metaArray.io.read    <> prefetcher.io.metaRead   // prefetch pipe: read
+metaArray.io.write   <> missUnit.io.metaWrite    // refill: write
+metaArray.io.flush   <> mainPipe.io.metaFlush    // main pipe: flush (ECC error 후 invalid)
+metaArray.io.flushAll := io.fencei               // fence.i: 전체 flush
+```
+
+즉 **prefetch_pipe와 main_pipe는 MetaArray에서 독립적이지 않다.**  
+main_pipe의 flush가 prefetcher의 read를 막을 수 있다.
+
+단일 포트 사용 우선순위는 아래 combinational 조건으로 결정된다.
+
+```scala
+// ICacheMetaInterleavedBank.scala
+io.read.req.ready := !io.write.req.valid && !io.flush.req.valid && !io.flushAll && tagArray.io.r.req.ready
+```
+
+우선순위:
+
+1. `flushAll` (fencei)
+2. `flush` (main_pipe, ECC error 후)
+3. `write` (refill)
+4. `read` (prefetcher)
+
+FSM이나 별도 arbitration controller는 없다. 모두 combinational 조건이며,  
+`ICacheMetaInterleavedBank`에 존재하는 유일한 레지스터는 valid bit 배열(`validArray`)뿐이다.
+
+> **flush는 validArray만 건드린다.** tagArray SRAM 포트는 사용하지 않는다.  
+> 그럼에도 flush 중 read를 막는 이유는, valid bit가 수정되는 도중에 해당 set을 읽으면 stale valid 정보를 보게 될 수 있기 때문이다.
+
+#### backpressure 전파 방식
+
+별도 arbitration controller 없이 **Ready-Valid 핸드쉐이크**로 backpressure가 upstream으로 전파된다.
+
+```text
+MetaArray.read.req.ready = false   ← write.valid 또는 flush.valid 올라옴
+  → toMeta.ready = false           (prefetch pipe 내 MetaArray 연결)
+  → s0_canGo = false
+  → s0_fire = false
+  → S0 pipeline register 진행 안 함 (stall in place)
+  → io.req.ready = false           → FTQ prefetch 요청이 block됨
+```
+
+```scala
+// ICachePrefetchPipe.scala
+private val s0_canGo = s1_ready && toItlb.ready && toMeta.ready
+s0_fire := s0_valid && s0_canGo && !s0_flush
+io.req.ready := s0_canGo
+```
 
 ---
 
-## 5. Meta Array — The Label System
+## 5. Data Array는 무엇을 저장하는가
 
-**Source file:** [icache/ICacheMetaArray.scala](../icache/ICacheMetaArray.scala), [icache/ICacheMetaInterleavedBank.scala](../icache/ICacheMetaInterleavedBank.scala)
+관련 파일:
 
-### What Is Metadata?
+- `src/main/scala/xiangshan/frontend/icache/ICacheDataArray.scala`
+- `src/main/scala/xiangshan/frontend/icache/ICacheDataBank.scala`
 
-Each of the 256 × 4 = 1024 cache slots has a small label attached to it (metadata). This label answers: **"What is stored here?"** Without labels, you would not know if the bytes in slot (Set 3, Way 2) belong to address 0x80001000 or 0xFFFF0000.
+data array는 실제 instruction bytes를 저장한다.  
+한 cache line은 64B이고, 이것을 8개의 bank로 나누어 저장한다.
 
-### What the Metadata Contains
-
-```
-MetaEntryBundle (per set × per way):
-┌─────────────────────────────────┬──────────────────┬──────────────────┐
-│  pTag                           │  maybeRvcMap     │  ECC code        │
-│  Physical tag bits              │  (MaxInstNum/Blk │  (parity, 1 bit) │
-│  [PAddrBits-1 : pgUntagBits]    │   bits = 32b)    │                  │
-└─────────────────────────────────┴──────────────────┴──────────────────┘
-  stored per way                     valid bits stored as registers (not SRAM)
+```text
+64B cache line
+  = 8 banks
+  = each bank stores 8B
 ```
 
-- **`pTag`** — The physical address tag. Used during lookup to confirm a hit.
-- **`maybeRvcMap`** — A hint bitmap: each bit says "this 8-byte chunk *might* contain a compressed (RVC) instruction." Helps the IFU decode 2-byte vs 4-byte instructions correctly.
-- **Valid bits** — Stored as flip-flop registers, **not** in SRAM. One bit per (set, way). Reset to 0 on `fence.i` or power-on.
+즉 bank 분할은 "서로 다른 cache line 8개"가 아니라,  
+"같은 cache line의 서로 다른 byte 구간 8개"라고 봐야 한다.
 
-### Physical SRAM Organization
-
-```
-Meta Array — Physical SRAM Layout
-                                          MetaWaySplit = 2
-                                         (4 ways → 2 SRAMs)
-                ┌─────────────────────────────────────────────┐
-                │  Interleaved Bank 0  (even sets: 0,2,4...) │
-                │  ┌─────────────────┐ ┌─────────────────┐   │
-                │  │  MetaSRAM[0][0] │ │  MetaSRAM[0][1] │   │
-                │  │  128 sets       │ │  128 sets       │   │
-                │  │  Way 0 & 1      │ │  Way 2 & 3      │   │
-                │  └─────────────────┘ └─────────────────┘   │
-                ├─────────────────────────────────────────────┤
-                │  Interleaved Bank 1  (odd sets: 1,3,5...) │
-                │  ┌─────────────────┐ ┌─────────────────┐   │
-                │  │  MetaSRAM[1][0] │ │  MetaSRAM[1][1] │   │
-                │  │  128 sets       │ │  128 sets       │   │
-                │  │  Way 0 & 1      │ │  Way 2 & 3      │   │
-                │  └─────────────────┘ └─────────────────┘   │
-                └─────────────────────────────────────────────┘
-
-Total: 4 physical SRAMs (2 interleaved banks × 2 way-splits)
-Template: SplittedSRAMTemplate (set=128, way=4, waySplit=2, dataSplit=1)
-Ports: singlePort = true (read and write cannot happen simultaneously)
-Clock gate: enabled (withClockGate = true)
-```
-
-### Meta SRAM Access
-
-```
-bankSel = vAddr[6]             (1 bit,  = vSetIdx[0])      → interleaved bank 0 or 1
-setIdx  = vAddr[13:7]          (7 bits, = vSetIdx[7:1])    → SRAM row 0–127 within bank
-waySel  = ALL ways read        (read all 4 ways, no pre-select)
-          → waymask is the OUTPUT: pTag comparison result
-```
-
-> **waySel이 없다.** Prefetch pipe는 meta SRAM에서 4 way를 전부 읽고 pTag를 비교한 뒤 waymask를 생성해 WayLookup에 저장한다.
-
-**Why interleaving?** The ICache often needs two consecutive sets simultaneously (2-port design for cross-line fetches). Interleaving ensures consecutive sets are in different banks — no bank conflict.
-
-```
-vAddr[6]=0 (even sets)  → bank 0, row = vAddr[13:7]
-vAddr[6]=1 (odd  sets)  → bank 1, row = vAddr[13:7]
-
-Example:
-  vSetIdx=0 (set 0)   → bank 0, row 0
-  vSetIdx=1 (set 1)   → bank 1, row 0
-  vSetIdx=2 (set 2)   → bank 0, row 1
-  vSetIdx=3 (set 3)   → bank 1, row 1
-```
-
-### ECC on Metadata
-
-Each meta entry is protected by **ECC** (Error Correcting Code) — explained in detail in [Section 13](#13-ecc--catching-corrupted-data). By default, **parity** is used: a single extra bit that catches 1-bit errors.
-
----
-
-## 6. Data Array — The Storage Shelves
-
-**Source file:** [icache/ICacheDataArray.scala](../icache/ICacheDataArray.scala), [icache/ICacheDataBank.scala](../icache/ICacheDataBank.scala)
-
-### Physical SRAM Organization
-
-Each 64-byte cache line is split across **8 banks** (`DataBanks = 8`), each holding 8 bytes (64 bits). Each bank further splits its 4 ways into **4 separate single-port SRAMs** — one per way.
-
-```
-Data Array — Physical SRAM Layout (8 banks × 4 ways = 32 SRAMs total)
-
-         Way 0       Way 1       Way 2       Way 3
-        ┌─────┐     ┌─────┐     ┌─────┐     ┌─────┐
-Bank 0  │SRAM │     │SRAM │     │SRAM │     │SRAM │   byte  0– 7  (256 sets × 64-bit)
-        ├─────┤     ├─────┤     ├─────┤     ├─────┤
-Bank 1  │SRAM │     │SRAM │     │SRAM │     │SRAM │   byte  8–15
-        ├─────┤     ├─────┤     ├─────┤     ├─────┤
-Bank 2  │SRAM │     │SRAM │     │SRAM │     │SRAM │   byte 16–23
-        ├─────┤     ├─────┤     ├─────┤     ├─────┤
-Bank 3  │SRAM │     │SRAM │     │SRAM │     │SRAM │   byte 24–31
-        ├─────┤     ├─────┤     ├─────┤     ├─────┤
-Bank 4  │SRAM │     │SRAM │     │SRAM │     │SRAM │   byte 32–39
-        ├─────┤     ├─────┤     ├─────┤     ├─────┤
-Bank 5  │SRAM │     │SRAM │     │SRAM │     │SRAM │   byte 40–47
-        ├─────┤     ├─────┤     ├─────┤     ├─────┤
-Bank 6  │SRAM │     │SRAM │     │SRAM │     │SRAM │   byte 48–55
-        ├─────┤     ├─────┤     ├─────┤     ├─────┤
-Bank 7  │SRAM │     │SRAM │     │SRAM │     │SRAM │   byte 56–63
-        └─────┘     └─────┘     └─────┘     └─────┘
-
-Each SRAM: SRAMTemplate(set=256, way=1, singlePort=true)
-Row width: 64 bits (data) + 1 bit (parity ECC) + 1 bit (padding) = 66 bits
-```
-
-### Data SRAM Access
-
-```
-setIdx  = vAddr[13:6]          (8 bits, log2(nSets=256))   → SRAM row 0–255
-bankSel = vAddr[5:3]           (3 bits, log2(DataBanks=8)) → which bank 0–7
-waySel  = WayLookup.waymask    (4 bits, one-hot)           → NOT from vAddr;
-                                                              result of pTag comparison
-                                                              done by prefetch pipe
-```
-
-> **waySel은 vAddr에서 오지 않는다.** Prefetch pipe가 meta SRAM을 읽고 pTag 비교를 수행한 결과(waymask)를 WayLookup에 저장해두면, main pipe S0에서 꺼내 SRAM way를 선택한다. (VIPT 구조)
-
-### Cache Line → Bank Mapping
-
-```
-Cache Line (64 bytes)
-Byte offset:  0    8   16   24   32   40   48   56
-              ↓    ↓    ↓    ↓    ↓    ↓    ↓    ↓
-            ┌────┬────┬────┬────┬────┬────┬────┬────┐
-            │ B0 │ B1 │ B2 │ B3 │ B4 │ B5 │ B6 │ B7 │
-            └────┴────┴────┴────┴────┴────┴────┴────┘
-bankIdx:      0    1    2    3    4    5    6    7
-            = blockOffset[5:3]
-```
-
-### What Data Banks Are (and Are Not)
-
-Data Array의 8개 bank는 **하나의 cache line을 byte 위치별로 분할한 것**이다.
-
-```
-Bank 0 = 모든 set의 cache line에서 byte  0– 7 구간
-Bank 1 = 모든 set의 cache line에서 byte  8–15 구간
+```text
+Bank 0 -> byte  0.. 7
+Bank 1 -> byte  8..15
+Bank 2 -> byte 16..23
 ...
-Bank 7 = 모든 set의 cache line에서 byte 56–63 구간
+Bank 7 -> byte 56..63
 ```
+
+이 점이 중요하다. 그래서:
+
+- prefetch pipe가 bank 0을 쓰고 main pipe가 bank 1을 쓰는 식의 분업은 아니다.
+- refill write가 발생하면 line 전체를 쓰므로 사실상 data array 읽기가 막힌다.
+
+### 5.1 왜 bank로 쪼개는가
+
+주된 이유는 두 가지다.
+
+1. 필요한 byte 구간만 읽어서 전력을 줄이기 위해
+2. fetch block이 line 경계를 넘는 경우 두 line의 bank를 적절히 섞어 읽기 위해
+
+`Helpers.scala`의 아래 함수들이 이를 담당한다.
+
+- `getBankSel(blkOffset, blkEndOffset, crossLine)`
+- `getLineSel(blkOffset)`
+- `getBankValid(portValid, blkOffset)`
+
+### 5.2 DataArray의 실제 input과 arbitration
+
+DataArray(`ICacheImp.scala`)에 연결된 input은 다음 2개다.
+
+```scala
+dataArray.io.read  <> mainPipe.io.dataRead     // main pipe: read
+dataArray.io.write <> missUnit.io.dataWrite    // refill: write
+```
+
+**prefetch_pipe는 DataArray에 전혀 연결되지 않는다.** DataArray에서 두 파이프 간 contention은 없다.
+
+단일 포트 사용 우선순위는 아래 combinational 조건으로 결정된다.
+
+```scala
+// ICacheDataBank.scala
+io.read.req.ready := !io.write.req.valid && ways.map(_.io.r.req.ready).reduce(_ && _)
+```
+
+우선순위:
+
+1. `write` (refill)
+2. `read` (main pipe)
+
+`ICacheDataBank`에는 레지스터가 하나도 없다. FSM이나 중재 상태가 없으며,  
+write.valid가 사라지면 다음 cycle에 combinational하게 read가 즉시 가능해진다.
+
+---
+
+## 6. 이 설계에서 가장 중요한 블록: WayLookup
+
+관련 파일:
+
+- `src/main/scala/xiangshan/frontend/icache/ICacheWayLookup.scala`
+- `src/main/scala/xiangshan/frontend/icache/Bundles.scala`
+- `src/main/scala/xiangshan/frontend/icache/Helpers.scala`
+
+이 문서를 이해할 때 가장 중요하면서도 가장 오해하기 쉬운 블록이 `WayLookup`이다.
+
+`WayLookup`은 단순한 "way 번호 저장소"가 아니다.  
+prefetch pipe가 미리 계산한 **fetch에 필요한 핵심 정보 묶음**을 큐 형태로 보관하는 구조다.
+
+`WayLookupEntry`를 보면 실제 저장 정보는 다음과 같다.
+
+| 필드 | 의미 |
+| --- | --- |
+| `vSetIdx(Vec[2])` | 두 포트가 볼 set index |
+| `waymask(Vec[2])` | 각 포트에서 hit한 way 결과 |
+| `maybeRvcMap(Vec[2])` | meta에서 가져온 압축 명령 힌트 |
+| `metaCodes(Vec[2])` | meta ECC code |
+| `pTag` | prefetch 시점의 physical tag |
+| `itlbPbmt` | iTLB 변환 결과의 PBMT |
+
+예외 정보는 `WayLookupEntry` 안에 전부 넣지 않고 별도로 저장한다.
+
+```scala
+private val exceptionEntry = RegInit(0.U.asTypeOf(Valid(new WayLookupExceptionEntry)))
+```
+
+이렇게 한 이유는, 주석 그대로 첫 번째 예외만 저장해도 flush가 걸리기 때문이다.
+
+### 6.1 왜 WayLookup이 필요한가
+
+main pipe의 빠른 경로에서 매번 아래 작업을 직접 하면 부담이 크다.
+
+1. iTLB 변환
+2. meta array read
+3. 4-way tag compare
+4. `waymask` 생성
+
+그래서 prefetch pipe가 이 작업을 앞에서 미리 수행하고, 결과를 `WayLookup`에 넣는다.  
+main pipe는 fetch가 실제로 들어왔을 때 그 결과를 바로 꺼내 data array만 읽는다.
+
+즉 `WayLookup`은 "prefetch 결과를 main pipe로 전달하는 지연 버퍼"다.
+
+### 6.2 큐 동작
+
+`WayLookup`은 원형 큐처럼 동작한다.
+
+- `writePtr`: prefetch pipe가 새 결과를 넣는 위치
+- `readPtr`: main pipe가 읽어 가는 위치
+- `empty`: 읽을 것이 없음
+- `full`: 더 쓸 수 없음
+
+핵심 로직은 다음과 같이 이해하면 된다.
+
+1. prefetch pipe가 `io.write.fire` 하면 엔트리가 enqueue된다.
+2. main pipe가 `io.read.fire` 하면 엔트리가 dequeue된다.
+3. 큐가 비어 있는데 같은 cycle에 write가 들어오면 bypass로 바로 read에 전달할 수 있다.
+
+코드에도 이 bypass가 있다.
+
+```scala
+private val canBypass = empty && io.write.valid && !exceptionEntry.valid
+```
+
+즉 prefetch 결과가 막 생성된 cycle에 main pipe가 바로 받아 가는 빠른 경로가 존재한다.
+
+### 6.2.1 WayLookup이 비어 있으면 어떻게 되나
+
+이 부분은 자주 오해되는 지점이다.  
+main pipe는 `WayLookup`가 비어 있을 때 다른 경로로 fallback하지 않는다.
+
+즉, 아래 같은 대체 경로는 없다.
+
+```text
+WayLookup miss
+  -> main pipe가 직접 iTLB 수행
+  -> main pipe가 직접 meta array read
+  -> main pipe가 직접 tag compare
+```
+
+실제 동작은 그 반대다.
+
+```text
+WayLookup miss
+  -> main pipe 진행 불가
+  -> FTQ fetchReq backpressure
+  -> bubble 발생
+```
+
+코드 관점에서는 `MainPipe S0`가 진행 조건에 `fromWayLookup.valid`를 직접 포함한다.
+
+```scala
+private val s0_canGo = toData.ready && fromWayLookup.valid && s1_ready
+fromFtq.ready := s0_canGo
+```
+
+의미는 간단하다.
+
+1. `WayLookup.valid = 1`이어야 main pipe가 data array read를 시작할 수 있다.
+2. `WayLookup.valid = 0`이면 fetch request를 받지 않는다.
+3. 따라서 오동작이 아니라 stall이 난다.
+
+이 설계는 "WayLookup이 항상 존재한다고 믿는다"기보다,  
+"WayLookup이 준비되지 않았으면 아예 fetch를 시작하지 않는다"라고 이해하는 편이 정확하다.
+
+### 6.2.2 같은 cycle에 막 만들어진 결과는 bypass된다
+
+`WayLookup`이 비어 있어도 prefetch pipe가 같은 cycle에 write를 만들면, queue에 저장했다가 다시 읽지 않고 바로 main pipe로 전달할 수 있다.
+
+즉 경우를 나누면 다음과 같다.
+
+1. `WayLookup`에 이미 엔트리가 있음
+   main pipe가 일반 dequeue 경로로 읽는다.
+2. `WayLookup`은 비어 있지만 prefetch 결과가 같은 cycle에 생성됨
+   bypass로 바로 전달된다.
+3. `WayLookup`도 비어 있고 prefetch 결과도 아직 없음
+   main pipe가 stall된다.
+
+그래서 `WayLookup`는 "없으면 틀릴 수 있는 speculative storage"가 아니라,  
+"있어야만 fetch를 진행할 수 있는 준비 완료 신호 포함 버퍼"에 가깝다.
+
+### 6.3 miss refill이 WayLookup을 업데이트하는 이유
+
+이 부분은 꼭 이해해야 한다.
+
+prefetch pipe가 `WayLookup`에 적어 둔 결과는 "그 시점의 meta 상태"를 기준으로 한다.  
+그 뒤에 miss refill이 완료되면 cache 상태가 바뀔 수 있다.
+
+예를 들어:
+
+1. prefetch 시점에는 miss라서 `waymask = 0`이었다.
+2. 잠시 뒤 miss refill이 완료되어 해당 line이 cache에 들어왔다.
+3. 아직 main pipe가 그 엔트리를 소비하지 않았다.
+
+이 경우 `WayLookup` 안의 오래된 정보는 틀린 상태다.  
+그래서 `ICacheWayLookup`은 `io.update: Valid[MissRespBundle]`를 받아 기존 엔트리를 갱신한다.
+
+`updateMetaInfo()`의 의미는 다음과 같다.
+
+- 같은 `vSetIdx`와 같은 `pTag`면:
+  refill 결과로 `waymask`, `maybeRvcMap`, `metaCodes`를 최신 값으로 덮어쓴다.
+- 같은 `vSetIdx`와 같은 `waymask`지만 `pTag`가 달라졌다면:
+  예전 hit 정보가 다른 line으로 대체된 상황이므로 `waymask := 0`으로 만들어 miss처럼 취급한다.
+
+즉 `WayLookup`은 단순 큐가 아니라, **refill에 의해 뒤늦게 정정되는 큐**다.
+
+### 6.4 flush와 branch flush
+
+`WayLookup`은 전역 flush뿐 아니라 BPU stage3 flush도 신경 쓴다.
+
+- `io.flush`: 큐 포인터 초기화
+- `flushFromBpu.shouldFlushByStage3(...)`: 꼬리 엔트리 하나를 되감는 동작
+
+이 부분은 `prefetch 결과는 만들어졌지만 아직 main pipe가 소비하지 않은 엔트리`를 branch flush로 버리기 위한 처리다.
+
+---
+
+## 7. Prefetch Pipe: 실제로 무엇을 미리 계산하는가
+
+관련 파일:
+
+- `src/main/scala/xiangshan/frontend/icache/ICachePrefetchPipe.scala`
+
+prefetch pipe는 3 stage로 보는 것이 가장 이해하기 쉽다.
+
+### 7.1 Stage 0
+
+입력:
+
+- FTQ의 prefetch request
+- `startAddr`
+- `nextlineStart`
+- `crossCacheline`
+
+이 stage에서 하는 일:
+
+1. 두 포트의 virtual address 준비
+2. `vSetIdx` 계산
+3. iTLB request 발행
+4. meta array read request 발행
+
+여기서 iTLB는 포트가 하나뿐이다.  
+코드 주석에도 있듯, kunminghu-v3에서는 한 fetch request가 page를 넘지 않는다고 가정하므로 첫 line 주소만으로 충분하다.
+
+즉 prefetch pipe는:
+
+- meta read는 2포트 감각으로 처리하지만
+- iTLB는 첫 line 기준 1회 변환으로 처리한다
+
+라고 이해하면 된다.
+
+### 7.2 Stage 1
+
+이 stage가 핵심이다.
+
+하는 일은 다음과 같다.
+
+1. iTLB 응답 수신
+2. physical tag 추출
+3. meta array 응답 수신
+4. 각 포트에서 4-way tag compare 수행
+5. `waymask`, `maybeRvcMap`, `metaCodes` 계산
+6. 필요하면 WayLookup enqueue
+7. PMP 검사
+8. 예외 / MMIO 여부 정리
+
+meta read 결과에서 실제 hit way를 만드는 코드는 이 부분이다.
+
+```scala
+val waymask = getWaymask(s1_pTag, portEntries)
+```
+
+즉 prefetch pipe가 하는 가장 중요한 일은 사실상:
+
+```text
+"이 주소는 현재 cache의 몇 번 way에 있나?"
+```
+
+를 미리 계산하는 것이다.
+
+### 7.3 Stage 2
+
+stage 2는 실제 prefetch miss를 miss unit에 보내는 단계다.
+
+이 stage에서 하는 일:
+
+1. SRAM hit 여부와 MSHR hit 여부 결합
+2. exception / MMIO가 아니고 miss이면 miss request 발행
+3. 두 포트의 miss를 arbiter로 묶어 `MissUnit`에 전달
+
+중요한 점:
+
+- prefetch가 hit이면 data array를 읽지 않는다.
+- prefetch는 data 자체를 가져오지 않는다.
+- prefetch의 주목적은 `WayLookup` 준비와 miss 선행 발행이다.
+
+### 7.4 `csrPfEnable`가 꺼지면 무엇이 멈추나
+
+이 신호는 이름만 보면 prefetch pipe 전체를 끄는 것처럼 보일 수 있지만, 실제로는 그렇지 않다.
+
+코드를 보면:
+
+```scala
+private val s1_realFire = s1_fire && io.csrPfEnable
+private val s2_valid = ValidHold(s1_realFire, s2_fire, s2_flush)
+```
+
+즉 `csrPfEnable`는 stage 2로 들어가는 miss prefetch 경로를 막는다.  
+반면 stage 1에서 수행하는 아래 작업은 계속 동작한다.
+
+1. iTLB 응답 수신
+2. meta read 결과 수신
+3. tag compare
+4. `WayLookup` enqueue
+
+따라서 `csrPfEnable = 0`일 때도 `WayLookup` 생성은 계속된다.  
+멈추는 것은 "앞당겨서 miss를 MissUnit에 보내는 기능"이지, main pipe를 위한 선행 lookup 자체가 아니다.
+
+---
+
+## 8. Main Pipe: 실제 fetch는 어떻게 처리되는가
+
+관련 파일:
+
+- `src/main/scala/xiangshan/frontend/icache/ICacheMainPipe.scala`
+
+main pipe는 2 stage로 보면 된다.
+
+### 8.1 Stage 0
+
+입력:
+
+- FTQ fetch request
+- `WayLookup` 결과
+
+이 stage에서 하는 일:
+
+1. fetch block이 cross-line인지 계산
+2. `WayLookup`에서 `waymask`, `pTag`, 예외 정보를 받음
+3. 그 `waymask`를 사용해 data array read request 발행
+
+여기서 중요한 assert가 하나 있다.
+
+```scala
+assert(s0_vSetIdx(i) === fromWayLookup.bits.vSetIdx(i))
+```
+
+즉 main pipe는 `WayLookup` 엔트리가 현재 FTQ fetch와 정확히 대응한다고 가정한다.  
+그래서 prefetch pipe와 main pipe의 요청 순서 정합성이 매우 중요하다.
+
+여기서 한 가지 더 중요한 점은, main pipe가 이 엔트리를 "없어도 되는 참고 정보"로 보는 것이 아니라는 점이다.
+
+진행 조건 자체가 `fromWayLookup.valid`에 묶여 있기 때문에:
+
+```scala
+private val s0_canGo = toData.ready && fromWayLookup.valid && s1_ready
+```
+
+`WayLookup`이 아직 준비되지 않았다면 main pipe는 fetch를 시작하지 않는다.  
+즉 이 설계는 "prefetch가 안 되어 있으면 main pipe가 직접 meta/TLB를 본다"가 아니라,
+
+```text
+prefetch 결과가 준비될 때까지 기다린다
+```
+
+가 정확한 설명이다.
+
+타임라인으로 보면 다음과 같다.
+
+```text
+이상적인 경우
+  Cycle N    : prefetch pipe S0, iTLB/meta request
+  Cycle N+1  : prefetch pipe S1, WayLookup write
+  Cycle N+2  : main pipe S0, WayLookup read + data read
+  Cycle N+3  : main pipe S1, IFU 응답
+
+prefetch가 늦은 경우
+  Cycle N    : fetchReq는 오고 싶지만 WayLookup.valid = 0
+             : main pipe는 fromFtq.ready = 0
+             : fetchReq를 받지 못하고 stall
+```
+
+그래서 `MainPipe`는 `WayLookup`를 신뢰하는 구조이긴 하지만,  
+그 신뢰는 "없어도 괜찮다"는 뜻이 아니라 "없으면 아예 진행하지 않는다"는 프로토콜 위에 서 있다.
+
+### 8.2 Stage 1
+
+이 stage에서 실제 fetch 결과가 정리된다.
+
+하는 일:
+
+1. data SRAM 응답 수신
+2. 같은 block의 miss refill 응답이 있으면 SRAM 대신 그 데이터 사용
+3. `maybeRvcMap` 선택
+4. meta ECC / data ECC 검사
+5. PMP 검사
+6. miss 필요 여부 판단
+7. IFU 응답 생성
+
+특히 data 선택은 "SRAM 결과와 MSHR refill 결과 중 어느 쪽이 더 최신인가"를 반영한다.
+
+즉:
+
+- 이미 cache hit이면 SRAM data 사용
+- miss였지만 refill 응답이 돌아왔으면 MSHR data 사용
+
+이 구조 덕분에 refill 완료 직후에도 main pipe가 별도 재시도 없이 데이터를 받을 수 있다.
+
+### 8.3 왜 main pipe는 meta array를 안 읽는가
+
+이 설계의 핵심 차별점 중 하나다.
+
+보통 ICache를 처음 보면 "hit 판정하려면 main pipe가 meta도 읽어야 하지 않나?"라는 의문이 든다.  
+그런데 XiangShan의 이 구현에서는 빠른 경로에서 그 일을 prefetch pipe가 대신한다.
+
+따라서 정상적인 fast path는:
+
+```text
+main pipe
+  = WayLookup에서 hit 정보 받음
+  + data array 읽음
+```
+
+이지,
+
+```text
+main pipe
+  = iTLB
+  + meta read
+  + data read
+```
+
+가 아니다.
+
+---
+
+## 9. hit / miss는 어떻게 결정되는가
+
+### 9.1 hit
+
+prefetch pipe가 만들어 둔 `waymask`에 1이 있으면 hit다.
+
+```scala
+private val s0_hits = VecInit(fromWayLookup.bits.waymask.map(_.orR))
+```
+
+즉 main pipe는 기본적으로 `WayLookup`의 판정을 신뢰하고 data array를 읽는다.
+
+### 9.2 miss
+
+아래 조건이면 miss 처리로 넘어간다.
+
+1. `waymask`가 0이라서 hit way가 없음
+2. 또는 ECC 오류로 refetch가 필요한 경우
+3. 단, exception이나 MMIO이면 refill을 보내지 않음
+
+main pipe의 miss 조건은 대략 아래와 같다.
+
+```text
+(!hit || corrupt_refetch) && no_exception && !mmio
+```
+
+prefetch pipe도 비슷하게 자신의 stage 2에서 miss를 판단하지만, 목적은 "미리 refill 요청"이다.  
+main pipe의 miss는 실제 fetch 완료를 위한 요청이라는 점이 다르다.
+
+---
+
+## 10. MissUnit과 MSHR
+
+관련 파일:
+
+- `src/main/scala/xiangshan/frontend/icache/ICacheMissUnit.scala`
+- `src/main/scala/xiangshan/frontend/icache/ICacheMshr.scala`
+- `src/main/scala/xiangshan/frontend/icache/ICacheReplacer.scala`
+
+`MissUnit`은 miss 요청을 받아 L2와 통신하고, refill 결과를 SRAM과 파이프라인에 돌려주는 블록이다.
+
+### 10.1 fetch miss와 prefetch miss는 분리되어 있다
+
+MSHR는 두 종류가 있다.
+
+- fetch용 `NumFetchMshr = 4`
+- prefetch용 `NumPrefetchMshr = 10`
+
+우선순위는 fetch 쪽이 더 높다.  
+TileLink acquire arbitration에서도 fetch MSHR가 먼저 선택되고, prefetch는 그 뒤를 따른다.
+
+### 10.2 duplicate miss를 막는 방법
+
+새 miss 요청이 들어오면 모든 MSHR을 lookup해서 이미 같은 block이 outstanding인지 확인한다.
 
 따라서:
-- 8개 bank는 **서로 다른 cache line을 독립적으로 저장하는 단위가 아니다.**
-- "main pipe가 bank 0을 쓰고 있으니 bank 1–7을 prefetcher에 할당" 하는 것은 불가능하다.
-  Bank 1–7은 bank 0과 **동일한 cache line의 다른 byte 구간**이기 때문이다.
-- Bank 분할의 목적은 두 가지: **power saving** (필요한 byte 구간만 activate) 과 **cross-line access** 처리.
 
-### Prefetcher의 실제 역할과 TLB port
+- 이미 진행 중인 fetch miss가 있으면 같은 fetch miss를 또 만들지 않는다.
+- prefetch miss도 마찬가지다.
+- 심지어 동일 cycle의 fetch/preftch 간 중복도 걸러낸다.
 
-Prefetch pipe는 bank를 활용하는 것이 아니라, FTQ가 예측한 **미래 fetch target (다음 cache line 주소)** 을 main pipe보다 먼저 처리하는 파이프라인이다.
+### 10.3 refill이 끝나면 무엇이 갱신되는가
 
-```scala
-// ICachePrefetchPipe.scala:47
-val itlb: TlbRequestIO = new TlbRequestIO   // 단일 포트, Vec 아님
+L2 grant의 마지막 beat를 받으면 `MissUnit`은 다음 세 가지를 동시에 수행한다.
 
-// line 154–155 (설계자 주석)
-// we need only one Itlb port to get pAddr / itlbException,
-// and we can simply use vAddr of first cacheline to send Itlb request.
-```
+1. `MetaArray` write
+2. `DataArray` write
+3. `MissRespBundle` broadcast
 
-**TLB port 1개로 충분한 이유:** prefetch pipe는 한 번에 request 하나를 순차 처리한다. Prefetch 병렬화의 병목은 TLB port 수나 SRAM bank 수가 아니라 **FTQ가 내려주는 prefetch target bandwidth (1 entry/cycle)** 이다.
+`MissRespBundle`에는 아래 정보가 들어 있다.
 
-```
-Timeline:
-  Cycle N:    Prefetch pipe → 주소 A (TLB + meta read → WayLookup write)
-  Cycle N+1:  Prefetch pipe → 주소 B
-  Cycle N+k:  Main pipe     → 주소 A (WayLookup에 결과 이미 있음 → TLB 없이 즉시 진행)
-```
+| 필드 | 의미 |
+| --- | --- |
+| `blkPAddr` | refill된 block 주소 |
+| `vSetIdx` | 채워 넣은 set |
+| `waymask` | 선택된 victim way |
+| `data` | line 전체 데이터 |
+| `maybeRvcMap` | refill 데이터에서 계산한 RVC 힌트 |
+| `corrupt`, `denied` | TileLink 응답 상태 |
 
-### Partial Bank Read (Power Saving)
+이 broadcast를 받는 쪽은:
 
-The CPU often fetches instructions starting at an unaligned offset — e.g., 24 bytes into a 64-byte line. Only the **needed banks** are activated; the rest stay powered down.
+- main pipe
+- prefetch pipe
+- WayLookup
 
-**Bank selection helpers** ([Helpers.scala](../icache/Helpers.scala)):
-- `getBankSel(blkOffset, blkEndOffset, crossLine)` — Returns a `Vec[Vec[Bool]]` bitmask: which banks of which line to read. Handles single-line and cross-line cases.
-- `getLineSel(blkOffset)` — Returns per-bank line assignment: banks before `bankIdxLow` belong to the **second** line (wrap-around), others to the first.
+이다.  
+즉 refill은 단순히 SRAM만 갱신하는 것이 아니라, 파이프라인 내부에 남아 있는 "오래된 판단"도 함께 정정한다.
 
-### Cross-Line Access (doubleline)
+### 10.4 victim way는 어디서 오나
 
-When a fetch request spans the boundary of two 64-byte lines (e.g., fetch at offset 56 for 16 bytes → bytes 56–63 from line N, bytes 0–7 from line N+1), `doubleline = true`. Both lines are read simultaneously; `getBankSel` computes two separate bank masks.
-
-### Read/Write Arbitration
-
-```
-Within each bank (ICacheDataBank):
-
-  read.ready  :=  !write.valid  AND  way_sram.r.ready
-                  ^^^^^^^^^^^
-                  Refill (write) blocks reads — refill has priority
-
-  write.ready :=  way_sram.w.ready   (independent of reads)
-```
-
-When refill is writing a line, any concurrent main-pipe read to the **same bank** is stalled for that cycle. Banks not involved in the refill are unaffected.
+`ICacheReplacer`가 victim way를 고른다.  
+반대로 cache hit가 났을 때는 main pipe가 `replacerTouch`를 보내 해당 set/way가 최근 사용되었다는 정보를 갱신한다.
 
 ---
 
-## 7. The Main Pipeline — Fetching Instructions
+## 11. ECC와 오류 처리
 
-**Source file:** [icache/ICacheMainPipe.scala](../icache/ICacheMainPipe.scala)
+관련 파일:
 
-This is the **critical path** — the pipeline that directly serves the CPU's fetch engine (FTQ = Fetch Target Queue). It has two stages.
+- `src/main/scala/xiangshan/frontend/icache/Helpers.scala`
+- `src/main/scala/xiangshan/frontend/icache/ICacheMainPipe.scala`
 
-### Stage 0 — Request and Dispatch
+기본 설정은 meta/data 모두 `parity`다.
 
-```
-FTQ sends a fetch request
-    → Decode address (vSetIdx, blockOffset)
-    → Read WayLookup (pre-computed hit/miss info from prefetcher)
-    → Send read request to DataArray (selected banks)
-    → s0_fire = valid && wayLookup has data && DataArray ready && Stage 1 ready
-```
+### 11.1 meta ECC
 
-The WayLookup provides a **predicted waymask** (which way to read from). If the prefetcher did its job, this is already computed, so Stage 0 sends directly to the right SRAM cells.
+meta corruption은 아래 두 상황을 잡으려 한다.
 
-### Stage 1 — Data Return, Verification, and Response
+1. hit한 한 way의 ECC code가 맞지 않음
+2. multi-hit가 발생함
 
-```
-    → Receive data from DataArray (or from MSHR if it was a prefetch hit)
-    → Receive pTag from MetaArray (via WayLookup)
-    → ECC check each bank
-    → Exception prioritization:
-        iTLB exception > PMP exception > L2 corrupt > ECC error
-    → If miss: send MissReq to MissUnit
-    → Send response to IFU with:
-        - Up to 2 cache lines of instruction bytes
-        - maybeRvcMap (for decoder hint)
-        - Exception info
-    → s1_fire = s1_valid && fetch is done && !respStall
-```
+특히 정상 cache라면 한 set에서 같은 tag로 multi-hit가 나면 안 되므로, 이것도 사실상 이상 상태다.
 
-**`s1_fetchFinish`** is true when: the data is available either from SRAM (cache hit) or from the MSHR (miss already being served and data returned).
+### 11.2 data ECC
 
-### Flush Handling
+data는 선택된 bank들에 대해서만 검사한다.  
+즉 fetch에 실제로 사용한 bank가 corrupt인지 본다.
 
-The FTQ can **flush** in-flight requests when the branch predictor is corrected. Both S0 and S1 monitor flush signals:
-- `s1_flush`: Clears Stage 1's valid bit.
-- `s0_flush`: Clears Stage 0's valid bit.
+### 11.3 오류 발생 시 동작
 
-Performance counters track how often each stage is flushed.
+현재 설정에서 `EnableCorruptRefetch = false`가 기본이므로, 일반적으로는 ECC 오류가 자동 재시도로 복구되지 않는다.  
+대신 main pipe가 하드웨어 오류 예외를 생성한다.
+
+만약 `EnableCorruptRefetch = true`면:
+
+1. 문제 있는 meta/data를 flush
+2. 다시 miss를 보내 refill
+
+의 형태로 자동 복구를 시도한다.
 
 ---
 
-## 8. Cache Hits and Misses
+## 12. stall이 어디서 생기는가
 
-### Hit — "It's Already on My Desk!"
+이 문서를 읽는 목적이 성능 해석이라면, stall 지점을 구분해서 보는 것이 중요하다.
 
-A **hit** occurs when the requested cache line is already stored in the ICache.
+### 12.1 main pipe stall
 
-**Hit Detection Sequence:**
-1. From WayLookup, retrieve the stored `pTag` and `waymask` for the requested set.
-2. Compare the request's physical address tag against the stored `pTag` in all 4 ways.
-3. A **1-hot waymask** is generated: exactly one bit is `1` for the matching way.
-4. `hit = orR(waymask)` — if any way matched, it's a hit.
-5. Use the waymask to select the right way's data from the data array output.
+대표 원인은 다음과 같다.
 
-Hit latency = **1 cycle** (read request sent in S0, data returned in S1).
+- `WayLookup` 결과가 아직 없음
+- data array가 refill write 때문에 바쁨
+- miss가 outstanding이라 fetch가 아직 안 끝남
+- IFU가 `respStall`을 걸음
 
-### Miss — "I Don't Have That Book!"
+### 12.2 prefetch pipe stall
 
-A **miss** occurs when no way in the selected set has the requested line.
+대표 원인은 다음과 같다.
 
-**Miss Sequence:**
-1. `s1_shouldFetch = !hit || corruptRefetch` — pipeline detects miss.
-2. Send `MissReqBundle` to `ICacheMissUnit`:
-   - `blkPAddr` — the physical block address needed
-   - `vSetIdx` — which set to fill into
-3. MissUnit assigns a free **MSHR** entry.
-4. MSHR sends a TileLink `Get` request to L2.
-5. L2 responds with the cache line data (multiple beats).
-6. MissUnit writes data back into the DataArray and MetaArray.
-7. MissUnit sends a response to the main pipe.
-8. Main pipe sends the instructions to IFU.
+- iTLB miss
+- meta array가 write/flush 때문에 busy
+- `WayLookup`가 full 또는 exception 상태
+- miss unit으로 miss request를 못 보냄
 
-Miss latency = **many cycles** (dependent on L2 / DRAM latency).
+### 12.3 array 단위 stall
 
----
+중요한 사실 두 가지:
 
-## 9. Miss Unit and MSHRs — The Emergency Errand System
+1. `MetaArray` read는 prefetch pipe 전용이다.
+2. `DataArray` read는 main pipe 전용이다.
 
-**Source file:** [icache/ICacheMissUnit.scala](../icache/ICacheMissUnit.scala), [icache/ICacheMshr.scala](../icache/ICacheMshr.scala)
+그래서 meta 측 stall과 data 측 stall은 성격이 다르다.
 
-### What Is an MSHR?
-
-**MSHR** = Miss Status Holding Register. When the cache misses, instead of stopping everything, the CPU registers the miss in an MSHR and **keeps working on other things**. The MSHR is like a ticket given to an errand runner: "Please go get book X from the library. Here's ticket #3 so I can track it."
-
-### MSHR Count and Priority
-
-```
-Total MSHRs: 14
-  ├── 4 Fetch MSHRs       (for requests from ICacheMainPipe)
-  └── 10 Prefetch MSHRs   (for requests from ICachePrefetchPipe)
-
-Priority: Fetch > Prefetch
-```
-
-More fetch MSHRs have higher priority because they are on the **critical path** — the CPU is actively waiting for them. Prefetch MSHRs work in the background.
-
-### MSHR State Machine
-
-Each MSHR has these internal flags:
-
-```
-States:
-  valid   — This MSHR is currently tracking a miss
-  flush   — A flush was requested while this MSHR was active
-  fencei  — A fence.i (instruction cache flush) was requested
-  issue   — The TileLink Get request has been sent to L2
-
-Lifecycle:
-  (idle) → accept request → set valid=true
-         → send TileLink Get → set issue=true
-         → receive all beats from L2
-         → write data to MetaArray and DataArray
-         → send response to requester
-         → clear valid (back to idle)
-```
-
-### Duplicate Detection
-
-Before allocating a new MSHR, the Miss Unit checks if **any existing MSHR already covers the same address**. If yes, the new request is merged — no duplicate L2 requests. This is critical for efficiency: many fetches and prefetches might target nearby addresses.
-
-Both the main pipe and prefetch pipe can query the MSHR status simultaneously:
-- **FetchHit**: Main pipe's address matches an existing MSHR → no new MSHR needed, just wait.
-- **PrefetchHit**: Prefetch pipe's address matches → no new MSHR needed.
-
-### TileLink Refill
-
-The L2 cache responds with data in multiple **beats** (chunks). For a 64-byte cache line, with a 256-bit (32-byte) data bus, there are `refillCycles = 2` beats. The MSHR collects all beats before writing to the data array.
-
-During refill, **corrupt** and **denied** flags are tracked:
-- **corrupt**: The data received has a checksum error.
-- **denied**: L2 refused to serve (e.g., access to a protected region).
+- meta 쪽이 막히면 prefetch 준비가 늦어진다.
+- data 쪽이 막히면 실제 fetch 응답이 늦어진다.
 
 ---
 
-## 10. Replacement Policy — Deciding What to Throw Away
+## 13. 자주 헷갈리는 포인트
 
-**Source file:** [icache/ICacheReplacer.scala](../icache/ICacheReplacer.scala)
+### 13.1 `PortNumber = 2`는 독립 fetch 두 개가 아니다
 
-### The Bookshelf Is Full — What Do We Remove?
+대부분의 경우 같은 fetch block 안의 두 cache line을 뜻한다.
 
-When all 4 ways in a set are occupied and a new line must be brought in, one existing line must be **evicted** (thrown away). The replacement policy decides which one.
+### 13.2 prefetch pipe는 instruction data를 직접 읽지 않는다
 
-### Set-PLRU (Pseudo-LRU)
+prefetch pipe의 주 일은:
 
-The default policy is **Set-PLRU** (set-associative Pseudo Least Recently Used).
+- iTLB
+- meta lookup
+- hit/miss 선판정
+- WayLookup 기록
+- 필요 시 miss 선행 발행
 
-**LRU idea:** Throw away the line that was **least recently used** — the book you haven't touched in the longest time.
+이다.
 
-**Pseudo-LRU** approximates true LRU with less hardware. Instead of a full timestamp per line, a binary tree of bits represents "which half was used more recently."
+### 13.3 main pipe는 fast path에서 meta array를 읽지 않는다
 
-**Example with 4 ways and PLRU:**
-```
-       [bit A]
-      /        \
-  [bit B]    [bit C]
-  /    \     /    \
-Way0  Way1  Way2  Way3
+main pipe는 `WayLookup` 결과를 소비한다.
 
-- bit A = 0 → left side (Way0/Way1) was used more recently → victim is on right
-- bit A = 1 → right side (Way2/Way3) was used more recently → victim is on left
-- bit B/C narrow it down further
-```
+### 13.4 bank는 "다른 line"이 아니라 "같은 line의 다른 byte 구간"이다
 
-### Two Replacers for Two Ports
+이 점을 잘못 이해하면 data array arbitration을 완전히 잘못 해석하게 된다.
 
-Since the ICache has 2 ports:
-- **Replacer 0** manages **even sets** (Sets 0, 2, 4, ..., 254)
-- **Replacer 1** manages **odd sets** (Sets 1, 3, 5, ..., 255)
+### 13.5 WayLookup은 고정 불변 결과가 아니다
 
-Each manages 128 sets × 4 ways.
-
-**Touch Operation (on hit):** When a way is accessed, its PLRU state is updated to mark it as "recently used."
-
-**Victim Selection (on miss):** The PLRU tree is queried to find the "least recently used" way to evict.
+refill broadcast를 받아 엔트리 내용이 수정될 수 있다.
 
 ---
 
-## 11. WayLookup Buffer — The Cheat Sheet
+## 14. Sequence Diagrams
 
-**Source file:** [icache/ICacheWayLookup.scala](../icache/ICacheWayLookup.scala)
-
-### The Problem WayLookup Solves
-
-The main pipe needs to know **which way to read from** as early as possible (Stage 0), so it can send the right SRAM read address. But tag comparison (to determine the hit way) normally takes time.
-
-The **prefetch pipe** runs ahead of the main pipe and pre-computes this information. WayLookup is the **message queue** between the prefetcher and the main pipe.
-
-### Ring Queue Structure
-
-```
-WayLookup = Ring Queue with 32 entries (WayLookupSize = 32)
-
-Each entry stores (for up to 2 ports):
-  ┌──────────────────────────────────────────────────────────────┐
-  │  waymask      [nWays bits, one-hot, per port]                │
-  │  pTag         [tagBits per port] → physical tag              │
-  │  metaCodes    [ECC bits]         → metadata ECC              │
-  │  vSetIdx      [idxBits per port] → set index                 │
-  │  itlbException                   → iTLB exception info       │
-  │  gpAddr / isForVSnonLeafPTE      → guest page fault info     │
-  └──────────────────────────────────────────────────────────────┘
-```
-
-### waymask 인코딩 — 0이 miss인가 way 0 hit인가?
-
-waymask는 **one-hot 인코딩**이다.
-
-```
-  way 0 hit  →  waymask = 0b0001  (bit 0 set, non-zero)
-  way 1 hit  →  waymask = 0b0010  (bit 1 set, non-zero)
-  miss       →  waymask = 0b0000  (no bit set, zero)
-```
-
-`getWaymask`의 구현:
-```scala
-VecInit((pTags zip valids).map { case (pt, v) => v && pt === reqPTag }).asUInt
-```
-어느 way도 pTag가 일치하지 않으면 전 bit 0 → waymask = 0 = miss.
-`waymask.orR`이 true면 hit, false면 miss. way 0 hit과 miss는 구별된다.
-
-### Ordering 보장 — Prefetch와 Main Pipe의 매칭
-
-Prefetch pipe는 **hit/miss 무관하게 항상 WayLookup에 write**한다.
-miss인 경우 waymask=0으로 기록하고, 별도로 MSHR에 fetch 요청을 보낸다.
-Main pipe는 WayLookup FIFO를 순서대로 read하므로, FTQ entry N에 대한 prefetch 결과는
-항상 FTQ entry N에 대응하는 main pipe 요청과 자동으로 매칭된다.
-별도의 tag/index matching 로직은 없으며, [ICacheMainPipe.scala:140](../icache/ICacheMainPipe.scala)의
-`vSetIdx` assertion이 순서가 맞는지 런타임에 검증한다.
-
-### Bypass Mode
-
-WayLookup queue가 **비어있는** 상태에서 prefetch pipe가 write하는 바로 그 사이클에
-main pipe가 read를 요청하면, 큐를 거치지 않고 **직접 bypass**된다 (대기 없음).
-
-```
-bypass 조건: empty && write.valid && !exceptionEntry.valid
-```
-
-### MSHR Update — 큐 내 entry 갱신
-
-MissUnit이 L2 fetch를 완료하면 `MissRespBundle`을 broadcast한다.
-WayLookup은 `io.update` 포트로 이를 수신해 **큐 안의 모든 entry에 대해** `updateMetaInfo`를 실행한다.
-
-`updateMetaInfo`는 `vSetIdx`가 같은 entry에 대해 두 케이스를 처리한다:
-
-| 조건 | 의미 | 처리 |
-|------|------|------|
-| `vSetSame && pTagSame` | 이 entry가 방금 fetch된 주소 | waymask 갱신 (miss → hit) |
-| `vSetSame && waySame && !pTagSame` | 같은 set의 같은 way가 다른 주소로 교체됨 → 이 entry의 데이터가 evict됨 | **waymask := 0** (hit → miss) |
-
-두 번째 케이스가 핵심이다. Prefetch가 "way 2에 hit"으로 WayLookup에 기록해두었더라도,
-그 사이에 main pipe MSHR이 같은 set의 way 2를 다른 주소로 교체하면,
-WayLookup 내 해당 entry의 waymask가 자동으로 0으로 초기화된다.
-Main pipe가 이 entry를 읽으면 miss로 처리하여 re-fetch한다.
-
-Main pipe가 entry를 읽기 전에 update가 완료된 경우:
-- `updateStall = true` → main pipe S0가 1사이클 대기 → 올바른 waymask 읽음
-
-Main pipe가 update 전에 이미 entry를 읽은 경우:
-- S1에서 `s1_shouldFetch = true` → `s1_fetchFinish = false` → S1 스톨
-- `fromMiss.valid`를 직접 모니터링 → MSHR 응답이 오면 해소
-
-### Main Pipe의 MSHR 요청 — Fetch/Prefetch MSHR 중복 처리
-
-Main pipe S1이 miss를 감지해 MissUnit에 fetch 요청을 보낼 때,
-MissUnit은 **fetch MSHR과 prefetch MSHR 전체**를 동시에 탐색한다.
-
-```scala
-// ICacheMissUnit.scala
-fetchHit := allMshr.map(_.io.lookUps(0).resp.hit).reduce(_ || _)
-
-fetchDemux.io.in.valid := io.fetchReq.valid && !fetchHit  // fetchHit이면 새 MSHR 할당 안 함
-io.fetchReq.ready      := fetchDemux.io.in.ready || fetchHit  // main pipe는 accepted 처리
-```
-
-| 상황 | 동작 |
-|------|------|
-| 어느 MSHR에도 없음 | 새 fetch MSHR 할당 → L2 요청 |
-| prefetch MSHR에 이미 있음 | `fetchHit=true` → 새 MSHR 없음, broadcast 대기 |
-| fetch MSHR에 이미 있음 | 동일 |
-
-Prefetch MSHR에 이미 있는 경우 **promotion/transfer는 없다.**
-Main pipe 요청은 drop되고, 기존 prefetch MSHR이 완료되면 `io.resp` broadcast가 발생한다.
-Main pipe S1은 `fromMiss.valid`를 모니터링하다가 이 broadcast를 수신해 정상 진행한다.
-
-단, prefetch MSHR은 flush 가능(`mshr.io.flush := io.flush`)하고
-fetch MSHR은 flush 불가(`mshr.io.flush := false.B`)이다.
-Prefetch MSHR이 flush될 경우 main pipe도 동일한 flush로 함께 비워지므로 문제없다.
-
-### MissUnit Response — 단일 Broadcast 포트
-
-MissUnit의 `io.resp`는 **포트가 하나**다. Fetch/prefetch MSHR 구분 없이,
-어느 MSHR이든 L2 응답이 완료되면 그 결과를 단일 `ValidIO[MissRespBundle]`로 broadcast한다.
-
-```
-io.resp ──→ ICacheMainPipe    (fromMiss)
-        ──→ ICachePrefetchPipe (fromMiss)
-        ──→ ICacheWayLookup    (io.update)
-```
-
-수신 측은 각자 `vSetIdx + blkPAddr`을 확인해 자기 요청과 매칭되면 처리하고,
-무관한 broadcast는 무시한다.
-
-### Exception Tracking
-
-WayLookup은 **첫 번째 exception만** 기록한다. Exception이 발생하면 반드시 redirect(flush)가
-따라오기 때문에, 이후 entry는 어차피 버려진다. Exception entry가 존재하는 동안은
-write를 차단하여 prefetch pipe를 stall시킨다(flush 대기).
+> **PrefetchPipe S1 FSM 참고:** PrefetchPipe의 S1 스테이지는 5-state FSM으로 구현되어 있다.  
+> `Idle → ItlbResend → MetaResend → EnqWay → EnterS2`  
+> DataArray/MetaArray의 SRAM 포트 arbitration(combinational)과는 별개다.
 
 ---
 
-## 12. The Prefetcher — The Psychic Helper
-
-**Source file:** [icache/ICachePrefetchPipe.scala](../icache/ICachePrefetchPipe.scala)
-
-### What Is Prefetching?
-
-**Prefetching** means fetching instructions **before the CPU officially asks for them**. It's like a helpful assistant who, seeing you read page 50, quietly goes to get pages 51–60 from the library so they're on your desk when you get there.
-
-Without prefetching: the main pipe has to wait for a miss to be resolved (slow).
-With prefetching: the miss is already in progress or done by the time the main pipe needs the line (fast).
-
-### Prefetch Sources
-
-The ICache supports two types of prefetch:
-
-1. **Hardware Prefetch** — Triggered by the **FTQ** (Fetch Target Queue). The branch predictor predicts future instruction addresses and sends them to the prefetch pipe ahead of time.
-
-2. **Software Prefetch** — Triggered by a `prefetch.i` instruction in the program itself. A programmer (or compiler) can insert this instruction to say "warm up the cache for this address."
-
-### Prefetch Pipe: 3 Stages
-
-#### Stage 0 — Receive Request
-
-```
-Receive prefetch request (from FTQ or software)
-    → Send iTLB request (translate virtual → physical address)
-    → Send MetaArray read request (check if already in cache)
-    → Record: vSetIdx, blockOffset, source (hw/sw)
-```
-
-#### Stage 1 — The FSM Heart
-
-This stage runs a 5-state **Finite State Machine (FSM)** — a decision machine that changes states based on conditions.
-
-```
-States:
-  Idle       → Ready for a new request
-  ItlbResend → iTLB translation not done yet; keep resending request
-  MetaResend → iTLB done, but MetaArray is busy; keep resending meta request
-  EnqWay     → Everything ready; write result to WayLookup
-  EnterS2    → Waiting for Stage 2 to accept the entry
-```
-
-**State Transitions:**
-
-```
-              ┌──────────────────────────────────────────────────────────┐
-    ──→  ┌────┴─────┐                                                    │
-         │   Idle   │ ◄──────────────────────────────────────────────────┤
-         └────┬─────┘                                                    │
-              │ s1_valid                                                  │
-              ├─── !tlbFinish ────────────────────────────────────────┐  │
-              │                                                        │  │
-              ├─── tlbFinish && !toWayLookup.fire ──────────────────┐ │  │
-              │                                                      │ │  │
-              │ tlbFinish && toWayLookup.fire && !s2_ready          │ │  │
-              ▼                                                      │ │  │
-         ┌──────────────┐                                            │ │  │
-         │  ItlbResend  │ ◄──────────────────┐ !tlbFinish           │ │  │
-         └──────┬───────┘                    │                       │ │  │
-                │ tlbFinish                  │                       │ │  │
-                ├─── toMeta.ready ──────────────────────────────┐   │ │  │
-                │                                                │   │ │  │
-                │ !toMeta.ready                                  │   │ │  │
-                ▼                                                ▼   ▼ │  │
-         ┌──────────────┐  toMeta.ready               ┌──────────────┐  │
-         │  MetaResend  │ ──────────────────────────→  │    EnqWay    │  │
-         └──────────────┘                              └──────┬───────┘  │
-              ▲  │ !toMeta.ready                              │           │
-              └──┘                              toWayLookup.fire          │
-                                               or isSoftPrefetch         │
-                                                             │            │
-                                          s2_ready           ▼            │
-                                        ┌──────────→  ┌──────────┐       │
-                                        │             │ EnterS2  │ ──────→┘
-                                        │             └──────────┘  s2_ready
-                                        │
-                                   (stay Idle)
-```
-
-**Condition to enqueue to WayLookup:**
-- iTLB translation complete (`tlbFinish`)
-- No exception
-- No concurrent SRAM write from Miss Unit (would cause conflict)
-- If software prefetch: skip WayLookup enqueue (saves power — software prefetch just warms the MSHR, not WayLookup)
-
-#### Stage 2 — Miss Detection and Request
-
-```
-Monitor MSHR update signals from MissUnit
-    → For each port (0 and 1):
-        - Is there a cache miss AND no exception AND not MMIO?
-        - Is there NOT already an MSHR for this address?
-        → YES: send MissReqBundle to MissUnit
-    → Arbiter combines two-port requests (software prefetch gets priority)
-```
-
-**MMIO** = Memory-Mapped I/O. Devices like keyboards are accessed through special addresses. These should NOT be prefetched — fetching them would trigger device side-effects!
-
-### Prefetch Enable Control
-
-The prefetcher can be turned on/off via `csr.pfEnable`. When disabled, Stage 2 suppresses all prefetch miss requests.
-
-### Power Consideration
-
-Software prefetch requests deliberately skip WayLookup enqueue. They still warm the cache (fill MSHRs), but avoid unnecessary SRAM reads in the main pipe — saving power when the software prefetch is speculative.
-
----
-
-## 13. ECC — Catching Corrupted Data
-
-**Source file:** [icache/ICacheMetaArray.scala](../icache/ICacheMetaArray.scala), [icache/ICacheDataBank.scala](../icache/ICacheDataBank.scala)
-
-### What Is ECC?
-
-**ECC** = Error Correcting Code (or Error Checking Code). SRAM cells (the memory cells inside the cache) can sometimes **flip** a bit due to cosmic rays, electrical noise, or manufacturing defects. ECC detects (and sometimes corrects) these errors.
-
-Think of it as a **checksum**: like how a phone number has a check digit to catch typos.
-
-### Supported ECC Schemes
-
-| Scheme | Setting | What It Does |
-|---|---|---|
-| `identity` | No ECC | No protection (dangerous) |
-| `parity` | Default | 1 extra bit; detects 1-bit error, cannot correct |
-| `sec` | Hamming SEC | Can **correct** 1-bit errors |
-| `secded` | Hamming SEC-DED | Corrects 1-bit, detects 2-bit errors |
-
-The default for both MetaArray and DataArray is **parity** — lightweight and fast.
-
-### How Parity Works
-
-Add all bits in the protected data together:
-- If the count of `1` bits is **even** → parity bit = 0
-- If the count of `1` bits is **odd** → parity bit = 1
-
-When reading back, if the recomputed parity doesn't match the stored parity bit → **error detected**.
-
-```
-Original data: 1011 0110   (five 1s → odd → parity = 1)
-Stored:        1011 0110  1   (data + parity bit)
-
-Corrupted:     1011 0100  1   (bit 1 flipped)
-Check:         four 1s → even → stored parity is 1 → MISMATCH → ERROR DETECTED!
-```
-
-### ECC in the Exception Chain
-
-When an ECC error is detected in Stage 1 of the main pipe, it is reported as an exception. The exception priority is:
-
-```
-1. iTLB exception (highest priority)
-2. PMP exception
-3. L2 corrupt (data denial from L2)
-4. ECC error (lowest priority)
-```
-
-### Test Support
-
-The hardware has special force-fail registers (`ForceMetaEccFail`, `ForceDataEccFail`) that can intentionally corrupt ECC bits during testing. This verifies that the error-handling logic works correctly in silicon.
-
----
-
-## 14. Performance Counters and Monitoring
-
-**Source file:** [icache/ICacheMainPipe.scala](../icache/ICacheMainPipe.scala), [icache/ICacheMissUnit.scala](../icache/ICacheMissUnit.scala)
-
-The ICache tracks many statistics to help engineers understand and optimize performance.
-
-### Miss Rate Counters
-
-| Counter | What It Counts |
-|---|---|
-| `icacheMissCnt` | Total cache misses (lines fetched from L2) |
-| `icacheMissPenaltyCnt` | Total cycles spent waiting for L2 to respond |
-
-### Prefetch Effectiveness
-
-| Counter | What It Counts |
-|---|---|
-| `icachePrefetchHitCnt` | How often a prefetched line was actually used by the main pipe |
-| `icachePrefetchMissCnt` | How often the prefetcher missed (prefetched wrong line) |
-| `icacheHwPrefetchHitCnt` | Hardware prefetch hits specifically |
-| `icacheHwPrefetchMissCnt` | Hardware prefetch misses |
-| `icacheSwPrefetchHitCnt` | Software prefetch hits specifically |
-| `icacheSwPrefetchMissCnt` | Software prefetch misses |
-
-### Stall Analysis
-
-| Counter | What It Counts |
-|---|---|
-| `icacheStallCnt` | Cycles where FTQ had a request but ICache couldn't accept it |
-| `mainPipeStallCnt` | Cycles main pipe stalled waiting for MSHR response |
-| `wayLookupStallCnt` | Cycles stalled waiting for WayLookup to have data |
-
-### Flush Counters
-
-| Counter | What It Counts |
-|---|---|
-| `icacheFlushS0Cnt` | Flushes that hit Stage 0 (early, less wasteful) |
-| `icacheFlushS1Cnt` | Flushes that hit Stage 1 (later, more wasteful) |
-
-A high `icacheFlushS1Cnt` suggests the branch predictor is frequently wrong — making the ICache do wasted work.
-
----
-
-## 15. Key Parameters Reference
-
-**Source file:** [icache/Parameters.scala](../icache/Parameters.scala)
-
-### Base Configuration Parameters
-
-```
-┌──────────────────────┬────────────────┬───────────────────────────────────────────────┐
-│ Parameter            │ Default Value  │ Description                                   │
-├──────────────────────┼────────────────┼───────────────────────────────────────────────┤
-│ nSets                │ 256            │ Number of cache sets (rows)                   │
-│ nWays                │ 4              │ Number of ways (columns)                      │
-│ blockBytes           │ 64             │ Cache line size in bytes                      │
-│ rowBits              │ 64             │ Bits per data SRAM bank row                   │
-│ DataBanks            │ 8              │ blockBits / rowBits = 512 / 64 = 8            │
-│ PortNumber           │ 2              │ Concurrent access ports (for cross-line)      │
-│ NumFetchMshr         │ 4              │ MSHRs for fetch requests                      │
-│ NumPrefetchMshr      │ 10             │ MSHRs for prefetch requests                   │
-│ WayLookupSize        │ 32             │ WayLookup ring queue depth                    │
-│ Replacer             │ "setplru"      │ Replacement policy                            │
-│ MetaEcc              │ "parity"       │ ECC scheme for MetaArray                      │
-│ DataEcc              │ "parity"       │ ECC scheme for DataArray                      │
-│ NumInterleavedBank   │ 2              │ Banks in MetaArray interleaving               │
-│ MetaWaySplit         │ 2              │ Way groups per MetaArray physical SRAM        │
-│ MaxInstNumPerBlock   │ 32             │ RVC map bits per 64B cache line               │
-│ MaxInstNumPerBank    │ 2              │ RVC map bits per 8-byte bank                  │
-│ EnableCorruptRefetch │ false          │ Re-fetch on ECC corruption (disabled timing)  │
-└──────────────────────┴────────────────┴───────────────────────────────────────────────┘
-```
-
-### SRAM Access — Address Field Summary
-
-```
-┌─────────────────┬──────────────┬────────┬─────────────────────────────────────────────┐
-│ SRAM            │ Field        │ vAddr  │ Note                                        │
-├─────────────────┼──────────────┼────────┼─────────────────────────────────────────────┤
-│ Data SRAM       │ setIdx       │ [13:6] │ 8 bits → row 0–255                          │
-│                 │ bankSel      │ [5:3]  │ 3 bits → bank 0–7                           │
-│                 │ waySel       │  —     │ WayLookup.waymask (NOT vAddr; pTag cmp out) │
-├─────────────────┼──────────────┼────────┼─────────────────────────────────────────────┤
-│ Meta SRAM       │ bankSel      │ [6]    │ 1 bit  → interleaved bank 0 or 1           │
-│ (prefetch reads)│ setIdx       │ [13:7] │ 7 bits → row 0–127 within bank             │
-│                 │ waySel       │  —     │ all ways read; waymask = pTag cmp output    │
-└─────────────────┴──────────────┴────────┴─────────────────────────────────────────────┘
-```
-
-### Physical SRAM Count Summary
-
-```
-┌──────────────────┬──────────────────────────────────┬──────────────────────────────┐
-│ Array            │ Structure                        │ Physical SRAMs               │
-├──────────────────┼──────────────────────────────────┼──────────────────────────────┤
-│ Data Array       │ 8 banks × 4 ways                 │ 32 SRAMs                     │
-│                  │ Each: set=256, way=1, 66 bits/row│ (SRAMTemplate, singlePort)   │
-├──────────────────┼──────────────────────────────────┼──────────────────────────────┤
-│ Meta Array       │ 2 interleaved banks × 2 waySplit │ 4 SRAMs                      │
-│                  │ Each: set=128, 2-ways, metaWidth  │ (SplittedSRAMTemplate)       │
-├──────────────────┼──────────────────────────────────┼──────────────────────────────┤
-│ Meta Valid bits  │ Registers (not SRAM)             │ 256 sets × 4 ways = 1024 FFs │
-└──────────────────┴──────────────────────────────────┴──────────────────────────────┘
-
-Total: 36 physical SRAMs  (32 data + 4 meta)
+### 14.1 Prefetch Pipe Access
+
+```mermaid
+sequenceDiagram
+    participant FTQ
+    participant PP as PrefetchPipe
+    participant TLB as iTLB
+    participant PMP
+    participant Meta as MetaArray
+    participant WL as WayLookup
+    participant MU as MissUnit
+
+    FTQ ->> PP: prefetch req (vAddr, vSetIdx)
+
+    Note over PP: [S0]
+    PP ->> TLB: req (vAddr)
+    PP ->> Meta: read (vSetIdx)
+
+    Note over PP: [S1] state = Idle
+
+    alt TLB miss → state = ItlbResend
+        loop s1_waitItlb
+            PP ->> TLB: retry req (vAddr)
+            TLB -->> PP: miss
+        end
+        TLB -->> PP: pTag (hit)
+
+        alt MetaArray blocked by refill → state = MetaResend
+            loop toMeta.ready = false
+                PP ->> Meta: retry read (vSetIdx)
+            end
+            Meta -->> PP: meta entries (fresh)
+        else MetaArray ready → state = EnqWay
+            PP ->> Meta: re-read (vSetIdx)
+            Meta -->> PP: meta entries
+        end
+
+    else TLB hit (tlbFinish in Idle)
+        TLB -->> PP: pTag
+        Meta -->> PP: meta entries
+    end
+
+    Note over PP: pTag compare → waymask 계산
+    PP ->> PMP: check (pAddr from pTag)
+    PMP -->> PP: result
+
+    Note over PP: state = EnqWay
+    alt iTLB exception (page fault 등)
+        PP ->> WL: enqueue {itlbException, waymask=0}
+    else PMP exception
+        PP ->> WL: enqueue {pmpException, waymask=0}
+    else cache hit (waymask ≠ 0)
+        PP ->> WL: enqueue {waymask, pTag, metaCodes, maybeRvcMap}
+    else cache miss (waymask = 0)
+        PP ->> WL: enqueue {waymask=0, pTag, metaCodes}
+    end
+
+    Note over PP: state = EnterS2 (if !s2_ready) → Idle
+    Note over PP: [S2] — csrPfEnable gate: s1_realFire = s1_fire && csrPfEnable
+
+    opt cache miss && no exception && csrPfEnable
+        PP ->> MU: prefetch miss req (blkPAddr, vSetIdx)
+        Note over MU: prefetch MSHR 할당 (최대 10개, flush 가능)
+    end
 ```
 
 ---
 
-## 16. Data Flow Diagram — Everything Together
+### 14.2 Main Pipe Access
 
-Here is the complete path of an instruction from the moment the CPU asks for it, to when it gets the bytes.
+```mermaid
+sequenceDiagram
+    participant FTQ
+    participant MP as MainPipe
+    participant WL as WayLookup
+    participant Data as DataArray
+    participant PMP
+    participant MU as MissUnit
+    participant IFU
 
-### Case A: Prefetch Hit (Best Case — 1 Cycle Latency)
+    FTQ ->> MP: fetch req (vAddr, vSetIdx)
 
+    Note over MP: [S0]
+
+    alt WayLookup empty (prefetch 미완료)
+        MP ->> WL: read
+        WL -->> MP: not valid
+        Note over MP: s0_canGo = false → stall (FTQ backpressure)
+    else WayLookup valid
+        MP ->> WL: read
+        WL -->> MP: {waymask, pTag, metaCodes, itlbException?}
+        MP ->> Data: read (vSetIdx, waymask, bankSel)
+        MP ->> PMP: check (pAddr)
+    end
+
+    Note over MP: [S1]
+    Data -->> MP: instruction bytes
+    PMP -->> MP: result
+
+    alt WayLookup update stall (MSHR refill 중 waymask 갱신 필요)
+        Note over MP: s0 1-cycle stall 후 갱신된 waymask로 진행
+    end
+
+    alt iTLB exception (from WayLookup)
+        MP ->> IFU: resp {itlbException}
+    else PMP exception
+        MP ->> IFU: resp {pmpException}
+    else ECC error (meta 또는 data)
+        Note over MP: metaFlush → MetaArray 해당 way invalid
+        MP ->> MU: fetch miss req (re-fetch from L2)
+        MU -->> MP: MissRespBundle broadcast
+        MP ->> IFU: resp {instructions}
+    else cache hit (waymask ≠ 0, no ECC error)
+        MP ->> IFU: resp {instructions}
+    else cache miss (waymask = 0)
+        MP ->> MU: fetch miss req (blkPAddr, vSetIdx)
+
+        alt cold miss (MSHR 없음)
+            Note over MU: fetch MSHR 할당 (최대 4개, flush 불가)
+        else MSHR hit (prefetch MSHR 또는 fetch MSHR 기존 존재)
+            Note over MU: fetchHit = true, 새 MSHR 불필요
+        end
+
+        Note over MP: s1_fetchFinish = false → S1 stall
+        MU -->> MP: MissRespBundle broadcast
+        MP ->> IFU: resp {instructions}
+    end
 ```
-Time →
-
-Cycle N-k (ahead of time):
-  FTQ → PrefetchPipe.S0 → [iTLB request] → [MetaArray read]
-  PrefetchPipe.S1 → [ITLB result] → [waymask computed] → WayLookup.enqueue
-
-Cycle N (main pipe starts):
-  FTQ → MainPipe.S0 → WayLookup.read (gets waymask)
-                    → DataArray.read (correct way, correct banks)
-
-Cycle N+1 (data returns):
-  MainPipe.S1 → DataArray returns data
-             → ECC check ✓
-             → Send instructions to IFU ✓  ← DONE in 1 pipeline cycle!
-```
-
-### Case B: Cache Miss (Worst Case — Many Cycles)
-
-```
-Cycle N:
-  FTQ → MainPipe.S0 → WayLookup.read (shows miss)
-
-Cycle N+1:
-  MainPipe.S1 → Cache miss detected
-             → MissReq sent to MissUnit
-             → MSHR allocated
-             → TileLink Get sent to L2
-
-Cycles N+2 ... N+M:
-  Waiting for L2 response...
-  (L2 may itself miss and go to DRAM — even longer)
-
-Cycle N+M:
-  MissUnit receives all TileLink beats from L2
-  → Writes data to DataArray and MetaArray
-  → Sends response to MainPipe.S1
-
-Cycle N+M+1:
-  MainPipe.S1 → Data available
-             → Send instructions to IFU ✓  ← DONE after M cycles of wait
-```
-
-### Case C: Prefetch Miss (Miss Already In-Flight)
-
-```
-Prefetch pipe sent MissReq to MissUnit already.
-When MainPipe.S1 checks MSHRs, it finds an active MSHR for the address.
-MainPipe.S1 waits for MSHR to complete.
-→ Latency is less than Case B because the miss was started earlier.
-```
-
-### Summary Table
-
-| Scenario | Where Data Comes From | Latency |
-|---|---|---|
-| Prefetch hit, SRAM hit | DataArray SRAM | 1 cycle (S0→S1) |
-| MSHR hit (in-flight miss) | MSHR response | Variable (wait for L2) |
-| Cold miss | L2 → MSHR → DataArray | Many cycles |
 
 ---
 
-## Q&A: Meta Array vs WayLookup — TLB 결과 재사용 구조
+### 14.3 Refill Write
 
-### Q: Meta array가 따로 존재하는 건 TLB access 했던 걸 다시 사용하기 위해서 캐시하는 거지?
+```mermaid
+sequenceDiagram
+    participant MU as MissUnit
+    participant L2
+    participant Data as DataArray
+    participant Meta as MetaArray
+    participant MP as MainPipe
+    participant PP as PrefetchPipe
+    participant WL as WayLookup
 
-정확히는 두 구조의 역할이 다릅니다.
+    Note over MU: MSHR에 pending miss (fetch 또는 prefetch)
+    MU ->> L2: TileLink Get (blkPAddr)
 
-**Meta array** — 일반적인 set-associative cache의 표준 구성요소입니다. 각 cache line의 **physical tag (pTag)**, **maybeRvcMap**, **ECC code**를 저장합니다. TLB 결과를 재사용하기 위한 게 아니라, tag 비교를 위한 storage입니다.
+    loop refillCycles = 2 beats (64B / 32B bus)
+        L2 -->> MU: TileLink Grant (data beat, corrupt?, denied?)
+        Note over MU: beat 수집, corruptReg / deniedReg 누적
+    end
 
-**WayLookup buffer** — 이게 바로 "TLB access 했던 걸 다시 사용"하기 위한 구조입니다.
+    Note over MU: lastFire → writeSramValid 판정
 
-### 파이프라인 흐름 및 각 파이프의 array 접근
+    alt L2 ok (not corrupt, not denied, not flushed)
+        MU ->> Data: write (vSetIdx, waymask, data)
+        MU ->> Meta: write (vSetIdx, waymask, pTag, maybeRvcMap)
+    else L2 corrupt or denied
+        Note over MU: writeSramValid = false — SRAM write 생략
+    else flush or fencei during refill
+        Note over MU: writeSramValid = false — SRAM write 생략
+        Note over MU: broadcast는 타이밍을 위해 그대로 전송
+    end
 
+    Note over MU: io.resp (단일 ValidIO broadcast 포트)
+    MU -->> MP: MissRespBundle {blkPAddr, vSetIdx, waymask, data, corrupt}
+    MU -->> PP: MissRespBundle (broadcast)
+    MU -->> WL: update {vSetIdx, waymask} — 큐 내 miss entry를 hit으로 갱신
 ```
-Prefetch pipe (pf0 → pf1 → pf2):
-  pf0: iTLB 요청 + meta array SRAM 읽기
-  pf1: iTLB 응답(pTag) + meta 응답 수신 → pTag 비교 → waymask 계산
-       → WayLookup에 {waymask, pTag, metaCodes, ...} enqueue
-  pf2: cache miss 여부 확인 → Miss Unit에 요청
-  ※ data array 접근 없음
-
-Main pipe (S0 → S1):
-  S0: WayLookup에서 precomputed waymask를 읽어서 → data array read request 전송
-  S1: data array response 수신 → IFU 전달
-  ※ meta array 직접 읽기 없음 (WayLookup의 metaCodes 사용)
-  ※ ECC 오류 발생 시에만 meta array write (flush)
-```
-
-| | Meta Array Read | Meta Array Write | Data Array Read |
-|---|---|---|---|
-| Prefetch pipe | O (pf0→pf1) | X | X |
-| Main pipe | X (WayLookup으로 대체) | O (ECC 오류 시 flush) | O (S0→S1) |
-
-Prefetch pipe가 **TLB + meta SRAM + tag 비교**를 미리 다 해놓고 WayLookup에 저장해두면, main pipe는 WayLookup만 읽어서 어느 way에서 data를 가져올지 바로 알 수 있습니다.
-
-- **Meta array** = tag 비교용 storage (set-associative cache의 기본 구성)
-- **WayLookup** = TLB + tag 비교 결과를 미리 계산해 저장하는 캐시
-
-### WayLookup Buffer 상세
-
-**물리적 구조:** 32-entry ring queue (FIFO). Prefetch pipe가 write, main pipe가 read.
-
-**각 entry에 저장되는 정보:**
-
-| 필드 | 크기 | 설명 |
-|---|---|---|
-| `vSetIdx[2]` | 8 bit × 2 | 요청한 virtual set index (포트 2개 지원) |
-| `waymask[2]` | 4 bit × 2 | one-hot: 어느 way에 hit했는지 (0~3번 way 중) |
-| `maybeRvcMap[2]` | 32 bit × 2 | meta array에서 읽은 RVC 압축 명령어 위치 bitmap |
-| `metaCodes[2]` | ECC bits × 2 | meta array에서 읽은 ECC code |
-| `pTag` | ~43 bit | iTLB가 반환한 physical tag |
-| `itlbPbmt` | — | physical memory attribute (PBMT) |
-| `itlbException` | — | iTLB에서 발생한 exception 정보 |
-| `gpAddr` | — | guest physical address (Sv48x4 가상화용) |
-
-**핵심 목적:** Main pipe S0에서 data array read를 시작하려면 "어느 way를 읽을지 (waymask)"를 그 사이클에 알아야 합니다. TLB + meta SRAM 접근 + tag 비교를 그 사이클에 즉석으로 하면 critical path가 너무 길어지므로, prefetch pipe가 미리 계산한 결과를 WayLookup에 저장해두고 main pipe가 꺼내 씁니다.
-
-### Prefetch pipe와 Main pipe의 타이밍 관계
-
-WayLookup은 **pf1에서 write**, main pipe **S0에서 read**이므로, 같은 FTQ entry 기준으로 prefetch pipe가 최소 **2 cycle** 앞서야 합니다.
-
-```
-cycle:    0      1      2      3
-prefetch: pf0    pf1    pf2         ← pf1에서 WayLookup write
-main:                   S0     S1   ← S0에서 WayLookup read
-```
-
-따라서 prefetch pipe는 main pipe보다 **여러 FTQ entry 앞선 것들을 미리 처리**해서 WayLookup에 쌓아두는 구조입니다. 32-entry ring queue는 이 가변적인 타이밍 차이를 흡수하기 위한 것으로, main pipe가 stall하면 entry가 쌓이고, prefetch pipe가 stall하면 main pipe가 WayLookup에서 기다립니다.
-
-### ICache Access Latency
-
-**Bypass 케이스 (WayLookup 비어 있을 때) — 최소 3 cycle:**
-
-```
-cycle 1: pf0       → meta array + iTLB request
-cycle 2: pf1 = S0  → waymask 계산 + bypass → data array request (동시)
-cycle 3: S1        → data array response → IFU
-```
-
-pf1과 S0가 같은 cycle에 겹치므로 최소 3 cycle.
-
-**일반 케이스 (WayLookup에 entry 있을 때) — 최소 4 cycle:**
-
-```
-cycle 1: pf0  → meta array + iTLB request
-cycle 2: pf1  → waymask 계산 → WayLookup write
-cycle 3: S0   → WayLookup read → data array request
-cycle 4: S1   → data array response → IFU
-```
-
-> **참고:** waymask는 "어느 way가 hit했는지"를 나타내는 one-hot 신호로, 일반적으로 wayselect라고도 불리는 개념입니다.
 
 ---
 
-## ICache Prefetcher 개선 아이디어
+### 시나리오별 요약
 
-현재 XiangShan ICache prefetch는 FTQ가 주는 next PC를 그대로 받아서 처리하는 단순한 구조입니다. Prefetch 강도 조절, pattern 감지, backend 상태 반영 등의 adaptive 요소가 전혀 없습니다. 아래는 성능 관점에서 고려할 수 있는 개선 방향입니다.
+| 대분류 | 소분류 | 결과 | latency |
+| --- | --- | --- | --- |
+| Prefetch | TLB hit + cache hit | WayLookup에 waymask 기록 | S0+S1 |
+| Prefetch | TLB hit + cache miss | WayLookup + MissUnit prefetch MSHR | S0+S1+S2 |
+| Prefetch | TLB miss | S1 ItlbResend loop → (MetaResend) → EnqWay | 가변 |
+| Prefetch | Exception (iTLB/PMP) | WayLookup에 exception 기록, MissUnit 없음 | S0+S1 |
+| Main pipe | cache hit | DataArray → IFU | 1 cycle (S0→S1) |
+| Main pipe | cache miss (cold) | MissUnit fetch MSHR → refill → IFU | 다수 cycle |
+| Main pipe | cache miss (MSHR hit) | 기존 MSHR 대기 → broadcast → IFU | 단축 가능 |
+| Main pipe | WayLookup empty | stall (prefetch 완료 대기) | 가변 |
+| Main pipe | ECC error | metaFlush + re-fetch → IFU | 다수 cycle |
+| Refill | L2 ok | DataArray + MetaArray write + broadcast | — |
+| Refill | L2 corrupt/denied | SRAM write 생략 + broadcast (corrupt flag) | — |
+| Refill | flush 중 refill 완료 | SRAM write 생략 + broadcast (타이밍용) | — |
 
-### 1. Backend Pressure-Aware Throttling
+### 각 파이프의 array 접근 정리
 
-**현재 문제:** Backend가 heavy (ROB full, LSQ full 등)할 때도 prefetch pipe는 FTQ entry를 계속 소비합니다. 이 경우 fetch한 instruction이 어차피 decode/dispatch 단계에서 막히므로 prefetch가 의미 없는 energy를 소모합니다.
-
-**개선 방향:** Backend로부터 backpressure signal (ROB occupancy threshold, dispatch stall 등)을 받아 prefetch 속도를 낮추거나 일시 정지. WayLookup이 가득 찬 상태를 유지하면서 불필요한 MSHR 소모를 줄일 수 있습니다.
-
-**현재 상태:** `csrPfEnable`로 on/off만 가능. 중간 단계 없음.
+| | MetaArray read | MetaArray flush | DataArray read | DataArray/MetaArray write |
+| --- | --- | --- | --- | --- |
+| **Prefetch pipe** | O (S0, S1) | X | X | X |
+| **Main pipe** | X (WayLookup 대체) | O (ECC 오류 시) | O (S0→S1) | X |
+| **MissUnit (refill)** | X | X | X | O (refill write) |
 
 ---
 
-### 2. iTLB Miss Bubble 감소
+## 15. 코드 읽는 순서 추천
 
-**현재 문제:** Prefetch pipe pf1에서 iTLB miss가 발생하면 WayLookup에 entry가 채워지지 않고, main pipe는 WayLookup이 빌 때까지 bubble을 삽입합니다. 이 상황은 코드에서 직접 topdown counter로 추적합니다:
+처음부터 전체를 보면 오히려 더 헷갈릴 수 있다. 아래 순서로 읽는 편이 낫다.
 
-```scala
-// ICacheImp.scala line 230
-io.toIfu.topdown.itlbMissBubble := prefetcher.io.perf.pendingItlbMiss && wayLookup.io.perf.empty
+1. `Parameters.scala`
+   파라미터와 용어를 먼저 잡는다.
+2. `Bundles.scala`
+   어떤 정보가 블록 사이를 오가는지 본다.
+3. `Helpers.scala`
+   주소/way/bank helper를 이해한다.
+4. `ICacheWayLookup.scala`
+   prefetch와 main pipe를 이어 주는 핵심 버퍼를 이해한다.
+5. `ICachePrefetchPipe.scala`
+   hit/miss 선판정과 WayLookup 생성 경로를 본다.
+6. `ICacheMainPipe.scala`
+   실제 fetch 응답 경로를 본다.
+7. `ICacheMissUnit.scala`
+   miss 처리와 refill broadcast를 본다.
+
+이 순서로 읽으면 "왜 main pipe가 meta를 안 읽는지", "왜 WayLookup update가 필요한지"가 훨씬 빨리 보인다.
+
+---
+
+## 16. 한 줄 결론
+
+이 ICache의 핵심 아이디어는 아래 한 문장으로 요약할 수 있다.
+
+> prefetch pipe가 iTLB와 meta lookup을 앞에서 끝내 두고, main pipe는 그 결과를 `WayLookup`으로 받아 data fetch와 miss 처리에 집중한다.
+
+그래서 이 구조를 이해할 때는 "cache array 자체"보다도 아래 세 경로의 연결 관계를 먼저 보는 것이 중요하다.
+
+```text
+PrefetchPipe -> WayLookup -> MainPipe
+                ^
+                |
+             MissUnit update
 ```
 
-**개선 방향:**
-- **iTLB prefetch:** prefetch pipe가 요청하는 virtual page를 미리 iTLB에 warm-up. 특히 함수 경계나 loop 진입 시 next page를 예측하여 선제 translation.
-- **Page-crossing 예측:** 현재 fetch block이 page boundary에 근접할 때 next page translation을 미리 시작.
-
----
-
-### 3. Prefetch Accuracy Feedback 부재
-
-**현재 문제:** Prefetch한 cache line이 실제로 main pipe에서 사용되었는지 추적하는 feedback loop가 없습니다. 불필요한 prefetch가 cache pollution을 일으켜도 감지할 수 없습니다.
-
-**개선 방향:** WayLookup entry가 main pipe에서 실제로 소비되었는지 (hit/miss 여부 포함) 추적하여 prefetch 정확도를 측정. 정확도가 낮으면 prefetch를 보수적으로 조정. MSHR을 fetch/prefetch 고정 분리 (현재 4/10)하는 대신 동적으로 재할당하는 방식도 고려 가능.
-
----
-
-### 4. MSHR 고정 분리 문제
-
-**현재 구조:** Fetch MSHR 4개, Prefetch MSHR 10개로 고정 분리 (`Parameters.scala`). Fetch miss가 몰릴 때 Prefetch MSHR을 빌려 쓸 수 없고, 반대로 prefetch miss가 없을 때 fetch MSHR 4개가 병목이 될 수 있습니다.
-
-**개선 방향:** MSHR pool을 unified로 두고 fetch 요청에 우선순위를 부여하는 방식. Fetch miss는 항상 prefetch miss보다 먼저 L2 요청을 보냄으로써 fetch latency를 줄이면서도 total MSHR 활용도를 높일 수 있습니다.
-
----
-
-### 5. WayLookup Bypass의 Timing Critical 경로
-
-**현재 문제:** WayLookup이 비어 있을 때 pf1 write → S0 read bypass 경로가 존재하지만, 코드 주석에 `(maybe timing critical)`로 명시되어 있습니다:
-
-```scala
-// ICacheWayLookup.scala line 124
-// if the entry is empty, but there is a valid write, we can bypass it to read port (maybe timing critical)
-```
-
-이 경로는 pf1의 combinational 결과가 같은 사이클 S0의 data array 주소로 직접 연결되므로, 타이밍 마진이 빠듯합니다.
-
-**개선 방향:** Bypass 경로를 제거하고 대신 WayLookup을 항상 1 cycle 이상 ahead로 유지하도록 prefetch pipe를 더 앞서 실행. 혹은 timing critical 경로를 pipeline register로 끊고 bypass miss penalty를 1 cycle 허용하는 트레이드오프 고려.
-
----
-
-### 6. L2 Early Hint로 MSHR Release 지연 숨기기
-
-> **발견:** 코드 분석 중 확인된 개선 포인트
-
-**현재 문제:** MSHR invalidation은 L2 grant last beat 도착 후 **1 cycle 지연** (`lastFireNext`)됩니다:
-
-```scala
-private val lastFireNext = RegNext(lastFire)          // 1 cycle delay
-allMshr(i).io.invalid := lastFireNext && (idNext === i.U)
-```
-
-이 때문에 doubleline miss 기준 2개로 충분할 MSHR이 back-to-back miss를 처리하기 위해 4개 필요합니다 (active 2 + release pending 2). Release를 combinational하게 처리했다면 2개로 충분했을 것이나, timing closure를 위해 `RegNext`를 쓴 tradeoff입니다.
-
-**개선 방향:** L2가 data를 보내기 2 cycle 전에 early hint signal을 보내면, prefetch pipe가 pf0를 그 시점에 시작할 수 있습니다:
-
-```
-현재:
-  L2 grant last beat (N) → lastFireNext (N+1) → MSHR free → prefetch 시작
-
-개선:
-  L2 early hint    (N-2) → prefetch pipe pf0 시작
-  L2 data          (N)   → SRAM write 완료 → 이미 pf1/pf2 진행 중
-```
-
-TileLink 스펙에는 이런 early hint 채널이 없으므로, L2(CoupledL2)와 ICache 사이에 custom signal을 추가하거나 **refill-triggered prefetch** 형태로 구현해야 합니다. Miss가 resolve될 때 인접 주소를 자동으로 prefetch하는 방식으로도 유사한 효과를 얻을 수 있으며, 현재 XiangShan에는 이 역시 구현되어 있지 않습니다.
-
----
-
-### 요약
-
-| 개선 항목 | 현재 한계 | 기대 효과 |
-|---|---|---|
-| Backend throttling | on/off만 가능 | 불필요한 energy/MSHR 소모 감소 |
-| iTLB miss bubble | 감지만 함, 완화 수단 없음 | fetch bubble 감소 |
-| Prefetch accuracy feedback | 없음 | cache pollution 방지, MSHR 효율화 |
-| MSHR 동적 할당 | 고정 4/10 분리 | fetch latency 감소, 활용도 향상 |
-| Bypass timing | timing critical 경로 존재 | timing closure 개선 |
-| L2 early hint | 없음 (TileLink 비지원) | MSHR release 지연 숨기기, miss latency 감소 |
-
----
-
-## Appendix: Source File Map
-
-| File | Role |
-|---|---|
-| [icache/ICache.scala](../icache/ICache.scala) | Top-level LazyModule, TileLink node |
-| [icache/ICacheImp.scala](../icache/ICacheImp.scala) | Module instantiation, wiring |
-| [icache/ICacheMainPipe.scala](../icache/ICacheMainPipe.scala) | Fetch pipeline (S0, S1) |
-| [icache/ICachePrefetchPipe.scala](../icache/ICachePrefetchPipe.scala) | Prefetch pipeline (S0, S1, S2) |
-| [icache/ICacheMissUnit.scala](../icache/ICacheMissUnit.scala) | MSHR orchestration, TileLink |
-| [icache/ICacheMshr.scala](../icache/ICacheMshr.scala) | Single MSHR state machine |
-| [icache/ICacheMetaArray.scala](../icache/ICacheMetaArray.scala) | Tag + RVC map SRAMs |
-| [icache/ICacheDataArray.scala](../icache/ICacheDataArray.scala) | Instruction data SRAMs |
-| [icache/ICacheDataBank.scala](../icache/ICacheDataBank.scala) | Single data bank SRAM |
-| [icache/ICacheReplacer.scala](../icache/ICacheReplacer.scala) | Set-PLRU replacement logic |
-| [icache/ICacheWayLookup.scala](../icache/ICacheWayLookup.scala) | Ring queue between prefetch and main |
-| [icache/Parameters.scala](../icache/Parameters.scala) | All configuration parameters |
-| [icache/Bundles.scala](../icache/Bundles.scala) | Signal bundle definitions |
-| [icache/Helpers.scala](../icache/Helpers.scala) | Utility functions |
-
----
-
-*Generated: 2026-03-17 | Branch: kunminghu-v3 | XiangShan CPU Project*
+이 관계를 잡고 나면 나머지 코드는 대부분 "그 fast path를 유지하기 위한 보조 로직"으로 읽힌다.
