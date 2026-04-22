@@ -252,6 +252,21 @@ io.req.ready := s0_canGo
 data array는 실제 instruction bytes를 저장한다.  
 한 cache line은 64B이고, 이것을 8개의 bank로 나누어 저장한다.
 
+### 5.0 DataArray 접근 패턴 요약
+
+| 포트 | 연결 대상 | 역할 |
+| --- | --- | --- |
+| `.read` | **main pipe 전용** | instruction bytes 조회 — IFU 응답용 |
+| `.write` | **refill (missUnit) 전용** | L2에서 받아온 data를 SRAM에 저장 |
+
+MetaArray와 달리 flush 포트가 없다. DataArray는 valid bit를 별도로 관리하지 않으며, invalidation은 MetaArray의 validArray 클리어로 처리된다.
+
+**핵심:**
+
+- **main pipe** → DataArray를 **읽는다**
+- **refill** → DataArray를 **쓴다**
+- **prefetch pipe** → DataArray에 **접근하지 않는다** — prefetch는 MetaArray만 읽고, data는 main pipe가 처리함
+
 ```text
 64B cache line
   = 8 banks
