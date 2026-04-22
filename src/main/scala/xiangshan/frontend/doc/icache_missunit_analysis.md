@@ -113,6 +113,35 @@ class DeMultiplexer[T <: Data](gen: T, n: Int)
 
 동작 방식은 우선순위 인코더다. `out(i).ready`가 true인 슬롯 중 가장 낮은 번호로 전달된다.
 
+#### fetch MSHR가 4개인 이유
+
+main pipe는 S0 → S1 2-stage 구조이며, `s0_canGo`가 `s1_ready`에 묶여 있어 S1이 stall 중이면 S0도 멈춘다. 따라서 S1에 동시에 존재할 수 있는 FTQ 요청은 1개뿐이다. 그 1개가 cross-line fetch이면 port 0, port 1이 각각 miss → 최대 2개의 fetch MSHR 소비.
+
+그러나 **fetch MSHR는 flush를 받지 않는다**(`mshr.io.flush := false.B`). 여기서 다음 시나리오가 발생한다.
+
+```text
+Cycle N   : A fires from S0 → S1 (DataArray read 발행)
+            동시에 B가 FTQ → S0 진입
+            (fromFtq.ready = s0_canGo = true 이었으므로 이미 committed)
+
+Cycle N+1 : A가 S1에서 miss 판정 → S1 stall
+            B는 S0에 있음 — FTQ는 이미 pointer를 진행시켰으므로 취소 불가
+
+Cycle N+K : branch misprediction flush 발생
+            → main pipe S1 invalidated (A의 pipeline stage 제거)
+            → A의 fetch MSHR[0,1]: non-flushable, 여전히 L2 in-flight
+
+            S1이 비었으므로 B가 S0 → S1 진행 가능
+            B (cross-line miss) → MSHR[2,3] 필요
+            A의 MSHR[0,1]은 아직 점유 중
+```
+
+`4 = 2 (flush 전 A의 cross-line miss) + 2 (flush 후 B의 cross-line miss)`
+
+flush가 없는 경우 B는 S0에서 A의 refill이 완료될 때까지 대기하다가, A의 MSHRs가 해제된 후 S1에 진입하므로 2개로 충분하다. flush가 있을 때만 두 세대의 miss가 동시에 MSHR를 점유하게 된다.
+
+`NumPrefetchMshr = 10`이 더 많은 이유는 다르다. prefetch MSHR는 flush로 즉시 해제 가능(`mshr.io.flush := io.flush`)하므로 headroom 목적이 아니라 선행 miss를 많이 쌓아 L2 요청을 overlap시키기 위한 것이다.
+
 ### 4.2 ICacheMshr — 개별 miss 처리 슬롯
 
 MSHR 하나가 담당하는 일:

@@ -1,0 +1,186 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="icache-block-diagram" name="ICache Block Diagram">
+    <mxGraphModel dx="2054" dy="1184" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="ext_ftq" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" value="&lt;b&gt;FTQ&lt;/b&gt;" vertex="1">
+          <mxGeometry height="60" width="200" x="680" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="ext_ifu" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" value="&lt;b&gt;IFU&lt;/b&gt;" vertex="1">
+          <mxGeometry height="60" width="130" x="1500" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="ext_l2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" value="&lt;b&gt;L2 Cache&lt;/b&gt;&#xa;(TileLink)" vertex="1">
+          <mxGeometry height="70" width="200" x="680" y="1020" as="geometry" />
+        </mxCell>
+        <mxCell id="icache_box" parent="1" style="text;html=1;strokeColor=#666666;fillColor=#f5f5f5;align=left;verticalAlign=top;spacingLeft=8;spacingTop=4;overflow=hidden;fontSize=14;fontStyle=1;fontColor=#333333;" value="ICache" vertex="1">
+          <mxGeometry height="810" width="1330" x="40" y="130" as="geometry" />
+        </mxCell>
+        <mxCell id="pp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;align=left;spacingLeft=6;" value="&lt;b&gt;ICachePrefetchPipe&lt;/b&gt;&#xa;S0: iTLB req, MetaArray req&#xa;S1: pTag compare → waymask&#xa;S2: prefetch miss → MissUnit" vertex="1">
+          <mxGeometry height="120" width="290" x="90" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="mp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;align=left;spacingLeft=6;" value="&lt;b&gt;ICacheMainPipe&lt;/b&gt;&#xa;S0: WayLookup read, DataArray req&#xa;S1: data select, ECC check&#xa;    → IFU resp / MissUnit req" vertex="1">
+          <mxGeometry height="120" width="300" x="1000" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="itlb" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" value="&lt;b&gt;iTLB&lt;/b&gt;" vertex="1">
+          <mxGeometry height="60" width="130" x="90" y="430" as="geometry" />
+        </mxCell>
+        <mxCell id="pmp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" value="&lt;b&gt;PMP&lt;/b&gt;" vertex="1">
+          <mxGeometry height="60" width="130" x="250" y="430" as="geometry" />
+        </mxCell>
+        <mxCell id="meta" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" value="&lt;b&gt;ICacheMetaArray&lt;/b&gt;&#xa;phyTag + maybeRvcMap + ECC&#xa;validArray (registers)" vertex="1">
+          <mxGeometry height="80" width="250" x="545" y="410" as="geometry" />
+        </mxCell>
+        <mxCell id="data" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" value="&lt;b&gt;ICacheDataArray&lt;/b&gt;&#xa;instruction bytes&#xa;8 banks × 8B/bank" vertex="1">
+          <mxGeometry height="80" width="250" x="870" y="410" as="geometry" />
+        </mxCell>
+        <mxCell id="wl" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="&lt;b&gt;ICacheWayLookup&lt;/b&gt;&#xa;waymask, pTag, metaCodes&#xa;maybeRvcMap, itlbPbmt" vertex="1">
+          <mxGeometry height="80" width="220" x="740" y="315" as="geometry" />
+        </mxCell>
+        <mxCell id="mu_box" parent="1" style="text;html=1;strokeColor=#d6b656;fillColor=#fff2cc;align=left;verticalAlign=top;spacingLeft=8;spacingTop=4;overflow=hidden;fontSize=12;fontStyle=1;" value="&lt;b&gt;ICacheMissUnit&lt;/b&gt;" vertex="1">
+          <mxGeometry height="270" width="710" x="360" y="620" as="geometry" />
+        </mxCell>
+        <mxCell id="mu_fmshr" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" value="Fetch MSHRs × 4&#xa;(non-flushable)&#xa;valid / issue / fencei" vertex="1">
+          <mxGeometry height="75" width="165" x="410" y="662" as="geometry" />
+        </mxCell>
+        <mxCell id="mu_pmshr" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" value="Prefetch MSHRs × 10&#xa;(flushable)&#xa;valid / issue / flush / fencei" vertex="1">
+          <mxGeometry height="75" width="165" x="410" y="775" as="geometry" />
+        </mxCell>
+        <mxCell id="mu_fifo" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" value="priorityFIFO&#xa;(FIFO issue order)" vertex="1">
+          <mxGeometry height="75" width="140" x="610" y="775" as="geometry" />
+        </mxCell>
+        <mxCell id="mu_grant" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" value="Grant beat collector&#xa;respDataReg[2]&#xa;corruptReg / deniedReg" vertex="1">
+          <mxGeometry height="75" width="155" x="610" y="636" as="geometry" />
+        </mxCell>
+        <mxCell id="mu_arb" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" value="acquireArb&#xa;fetch(0~3) &gt; prefetch(4)&#xa;→ memAcquire" vertex="1">
+          <mxGeometry height="75" width="165" x="810" y="710" as="geometry" />
+        </mxCell>
+        <mxCell id="replacer" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="&lt;b&gt;ICacheReplacer&lt;/b&gt;&#xa;PLRU × 2&#xa;(vSetIdx[0] 기준 분리)" vertex="1">
+          <mxGeometry height="80" width="190" x="1140" y="680" as="geometry" />
+        </mxCell>
+        <mxCell id="e_ftq_pp" edge="1" parent="1" source="ext_ftq" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;exitX=0.25;exitY=1;exitDx=0;exitDy=0;" target="pp" value="prefetch req">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_ftq_mp" edge="1" parent="1" source="ext_ftq" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;exitX=0.75;exitY=1;exitDx=0;exitDy=0;" target="mp" value="fetch req">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_pp_itlb" edge="1" parent="1" source="pp" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;endArrow=block;endFill=1;startArrow=block;startFill=0;" target="itlb" value="vAddr / pTag">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_pp_pmp" edge="1" parent="1" source="pp" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;endArrow=block;endFill=1;startArrow=block;startFill=0;" target="pmp" value="pAddr / result">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_pp_meta_r" edge="1" parent="1" source="pp" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" target="meta" value="read (vSetIdx)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_pp_wl" edge="1" parent="1" source="pp" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" target="wl" value="enqueue (waymask, pTag, ...)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_pp_pmshr" edge="1" parent="1" source="pp" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" target="mu_pmshr" value="prefetchReq (S2)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_wl_mp" edge="1" parent="1" source="wl" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" target="mp" value="dequeue (waymask, pTag, ...)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_mp_data_r" edge="1" parent="1" source="mp" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" target="data" value="read (vSetIdx, waymask)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_mp_ifu" edge="1" parent="1" source="mp" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" target="ext_ifu" value="fetch resp&#xa;(instructions)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_mp_meta_flush" edge="1" parent="1" source="mp" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;dashed=1;strokeColor=#b85450;exitX=0.75;exitY=1;exitDx=0;exitDy=0;" target="meta" value="metaFlush (ECC err)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1220" y="320" />
+              <mxPoint x="1220" y="530" />
+              <mxPoint x="585" y="530" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_mp_fmshr" edge="1" parent="1" source="mp" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;exitX=0;exitY=0.25;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" target="mu_fmshr" value="fetchReq (miss)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_mp_replacer" edge="1" parent="1" source="mp" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;exitX=1;exitY=1;exitDx=0;exitDy=0;" target="replacer" value="touch (hit way)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_fmshr_arb" edge="1" parent="1" source="mu_fmshr" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" target="mu_arb" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="590" y="708" />
+              <mxPoint x="590" y="748" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_pmshr_fifo" edge="1" parent="1" source="mu_pmshr" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" target="mu_fifo" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_fifo_arb" edge="1" parent="1" source="mu_fifo" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;entryX=0.25;entryY=1;entryDx=0;entryDy=0;" target="mu_arb" value="sel">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_arb_l2" edge="1" parent="1" source="mu_arb" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" target="ext_l2" value="TileLink A (acquire)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_l2_grant" edge="1" parent="1" source="ext_l2" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="mu_grant" value="TileLink D (grant)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_arb_replacer" edge="1" parent="1" source="mu_arb" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" target="replacer" value="victim req">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_replacer_arb" edge="1" parent="1" source="replacer" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" target="mu_arb" value="victim way">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_mu_meta_w" edge="1" parent="1" source="mu_box" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#b85450;fontColor=#b85450;" target="meta" value="write (refill)&#xa;pTag, waymask, maybeRvcMap">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="585" y="600" />
+              <mxPoint x="585" y="490" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_mu_data_w" edge="1" parent="1" source="mu_box" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#b85450;fontColor=#b85450;" target="data" value="write (refill)&#xa;data, waymask">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="995" y="600" />
+              <mxPoint x="995" y="490" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_mu_wl" edge="1" parent="1" source="mu_box" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;dashed=1;strokeColor=#d6b656;fontColor=#d6b656;" target="wl" value="update (broadcast)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="850" y="610" />
+              <mxPoint x="850" y="320" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_mu_mp" edge="1" parent="1" source="mu_box" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;dashed=1;strokeColor=#d6b656;fontColor=#d6b656;exitX=0;exitY=0.25;exitDx=0;exitDy=0;" target="icache_box" value="resp broadcast">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_mu_pp" edge="1" parent="1" source="mu_box" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;dashed=1;strokeColor=#d6b656;fontColor=#d6b656;entryX=0;entryY=0.75;entryDx=0;entryDy=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;" target="pp" value="resp broadcast">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="310" y="755" />
+              <mxPoint x="310" y="610" />
+              <mxPoint x="80" y="610" />
+              <mxPoint x="80" y="290" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_fencei_meta" edge="1" parent="1" source="e_fencei_label" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;dashed=1;strokeColor=#999999;entryX=0;entryY=0.5;entryDx=0;entryDy=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" target="meta" value="fencei (flushAll)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="490" y="575" />
+              <mxPoint x="490" y="450" />
+            </Array>
+            <mxPoint x="460" y="350" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_fencei_label" parent="1" style="text;html=1;fontSize=10;fontColor=#999999;" value="fencei" vertex="1">
+          <mxGeometry height="20" width="60" x="90" y="565" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
