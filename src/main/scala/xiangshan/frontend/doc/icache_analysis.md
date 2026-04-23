@@ -285,6 +285,45 @@ Bank 7 → byte 56..63
 
 ---
 
+### 5.3 SRAM Layout
+
+> → See [icache_sram_layout.drawio](./icache_sram_layout.drawio)
+
+<!-- draw.io에서 PNG/SVG export 후 아래 경로에 저장:
+     ![ICache SRAM Layout](./icache_sram_layout.png)
+-->
+
+---
+
+### 5.4 SRAM 수 / 총 용량 요약
+
+**유효 데이터 용량 (effective capacity):**
+`nSets(256) × nWays(4) × blockBytes(64B) = 65,536 B = 64 KB`
+
+**SRAM 인스턴스 수:**
+
+| Array | 구조 | 물리 SRAM 수 |
+| ----- | ---- | ----------- |
+| DataArray | 8 banks × 4 ways (SRAMTemplate, way=1) | **32개** |
+| MetaArray | 2 interleaved banks × (waySplit=2 × dataSplit=1) | **4개** |
+| **합계** | | **36개** |
+
+**SRAM raw bit 용량 (ECC·패딩 포함):**
+
+| Array | 계산식 | Raw 용량 |
+| ----- | ------ | ------- |
+| DataArray | 8 banks × 4 ways × 256 sets × 66 b (DataSramWidth) | 540,672 b ≈ **66 KB** |
+| MetaArray | 2 banks × 4 ways × 128 sets × 67 b (MetaEntryBits) | 68,608 b ≈ **8.4 KB** |
+| **합계** | | ≈ **74.4 KB** raw |
+
+> DataSramWidth = 64(data) + 1(parity) + 1(padding) = 66 b
+>
+> MetaEntryBits = MetaBits(66) + 1(parity) = 67 b
+>
+> MetaBits = tagBits(34, PAddrBits48−untagBits14) + maybeRvcMap(32) = 66 b
+
+---
+
 ## 6. Internal Pipeline / State
 
 ### 6.1 ICacheMainPipe (2-stage)

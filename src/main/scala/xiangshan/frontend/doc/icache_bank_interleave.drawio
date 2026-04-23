@@ -1,0 +1,356 @@
+<mxfile host="app.diagrams.net">
+
+<!-- ================================================================
+     PAGE 1: Sub-bank Mapping  (sets 0-15 color-coded by sub-bank)
+     ================================================================ -->
+<diagram id="p1" name="1. Sub-bank Mapping">
+<mxGraphModel pageWidth="1250" pageHeight="560" grid="0">
+<root>
+<mxCell id="0"/><mxCell id="1" parent="0"/>
+
+<!-- Title -->
+<mxCell id="2" value="ICache DataArray: Set → Sub-bank Mapping" style="text;html=1;strokeColor=none;fillColor=none;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="1"><mxGeometry x="20" y="10" width="700" height="30" as="geometry"/></mxCell>
+
+<!-- ── 2-Way section ──────────────────────────────────────────── -->
+<mxCell id="3" value="▶ 2-Way Interleaved  (NumInterleavedBank=2)   sub_bank = vSetIdx[0]   row = vSetIdx[7:1]  (0~127)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="48" width="950" height="22" as="geometry"/></mxCell>
+
+<!-- Set cells S0-S15  (step=62px: 55 wide + 7 gap) -->
+<!-- blue=SB0, orange=SB1 -->
+<mxCell id="10" value="S0"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20"  y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="11" value="S1"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="82"  y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="12" value="S2"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="144" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="13" value="S3"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="206" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="14" value="S4"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="268" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="15" value="S5"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="330" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="16" value="S6"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="392" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="17" value="S7"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="454" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="18" value="S8"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="516" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="19" value="S9"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="578" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="20" value="S10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="640" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="21" value="S11" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="702" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="22" value="S12" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="764" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="23" value="S13" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="826" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="24" value="S14" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="888" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="25" value="S15" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="950" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="26" value="···" style="text;html=1;strokeColor=none;fillColor=none;fontSize=16;align=center;" vertex="1" parent="1"><mxGeometry x="1010" y="76" width="35" height="42" as="geometry"/></mxCell>
+<mxCell id="27" value="S254" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="1052" y="76" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="28" value="S255" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="1114" y="76" width="55" height="42" as="geometry"/></mxCell>
+
+<!-- 2-Way sub-bank result bars -->
+<mxCell id="30" value="Sub-bank 0  (even: S0, S2, S4, … S254)   depth = 128   row = vSetIdx[7:1]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1"><mxGeometry x="20" y="130" width="760" height="32" as="geometry"/></mxCell>
+<mxCell id="31" value="Sub-bank 1  (odd:  S1, S3, S5, … S255)   depth = 128   row = vSetIdx[7:1]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1"><mxGeometry x="20" y="170" width="760" height="32" as="geometry"/></mxCell>
+<mxCell id="32" value="vSetIdx [7:1] = row_addr (0~127)&#xa;vSetIdx [0]   = sub_bank_sel" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="800" y="130" width="260" height="72" as="geometry"/></mxCell>
+
+<!-- Divider -->
+<mxCell id="33" value="" style="line;strokeColor=#999;fillColor=none;strokeWidth=1;" vertex="1" parent="1"><mxGeometry x="20" y="216" width="1180" height="8" as="geometry"/></mxCell>
+
+<!-- ── 4-Way section ──────────────────────────────────────────── -->
+<mxCell id="34" value="▶ 4-Way Interleaved  (NumInterleavedBank=4)   sub_bank = vSetIdx[1:0]   row = vSetIdx[7:2]  (0~63)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="230" width="950" height="22" as="geometry"/></mxCell>
+
+<!-- Set cells S0-S15 (4 colors)  blue=SB0  orange=SB1  green=SB2  purple=SB3 -->
+<mxCell id="40" value="S0"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20"  y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="41" value="S1"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="82"  y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="42" value="S2"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="144" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="43" value="S3"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="206" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="44" value="S4"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="268" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="45" value="S5"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="330" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="46" value="S6"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="392" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="47" value="S7"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="454" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="48" value="S8"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="516" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="49" value="S9"  style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="578" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="50" value="S10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="640" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="51" value="S11" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="702" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="52" value="S12" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="764" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="53" value="S13" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="826" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="54" value="S14" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="888" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="55" value="S15" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="950" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="56" value="···" style="text;html=1;strokeColor=none;fillColor=none;fontSize=16;align=center;" vertex="1" parent="1"><mxGeometry x="1010" y="258" width="35" height="42" as="geometry"/></mxCell>
+<mxCell id="57" value="S252" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="1052" y="258" width="55" height="42" as="geometry"/></mxCell>
+<mxCell id="58" value="S255" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="1114" y="258" width="55" height="42" as="geometry"/></mxCell>
+
+<!-- 4-Way sub-bank result bars -->
+<mxCell id="60" value="Sub-bank 0  (S0, S4, S8, … S252)   depth = 64   row = vSetIdx[7:2]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1"><mxGeometry x="20" y="312" width="680" height="28" as="geometry"/></mxCell>
+<mxCell id="61" value="Sub-bank 1  (S1, S5, S9, … S253)   depth = 64   row = vSetIdx[7:2]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1"><mxGeometry x="20" y="346" width="680" height="28" as="geometry"/></mxCell>
+<mxCell id="62" value="Sub-bank 2  (S2, S6, S10, … S254)   depth = 64   row = vSetIdx[7:2]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1"><mxGeometry x="20" y="380" width="680" height="28" as="geometry"/></mxCell>
+<mxCell id="63" value="Sub-bank 3  (S3, S7, S11, … S255)   depth = 64   row = vSetIdx[7:2]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1"><mxGeometry x="20" y="414" width="680" height="28" as="geometry"/></mxCell>
+<mxCell id="64" value="vSetIdx [7:2] = row_addr (0~63)&#xa;vSetIdx [1:0] = sub_bank_sel" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="720" y="330" width="260" height="72" as="geometry"/></mxCell>
+
+<!-- Legend -->
+<mxCell id="70" value="■ SB0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1"><mxGeometry x="720" y="418" width="60" height="26" as="geometry"/></mxCell>
+<mxCell id="71" value="■ SB1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1"><mxGeometry x="788" y="418" width="60" height="26" as="geometry"/></mxCell>
+<mxCell id="72" value="■ SB2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1"><mxGeometry x="856" y="418" width="60" height="26" as="geometry"/></mxCell>
+<mxCell id="73" value="■ SB3" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1"><mxGeometry x="924" y="418" width="60" height="26" as="geometry"/></mxCell>
+
+</root></mxGraphModel>
+</diagram>
+
+<!-- ================================================================
+     PAGE 2: SRAM Physical Layout  (2-Way vs 4-Way grid)
+     ================================================================ -->
+<diagram id="p2" name="2. SRAM Physical Layout">
+<mxGraphModel pageWidth="1100" pageHeight="700" grid="0">
+<root>
+<mxCell id="0"/><mxCell id="1" parent="0"/>
+
+<mxCell id="2" value="SRAM Physical Layout Comparison" style="text;html=1;strokeColor=none;fillColor=none;fontSize=16;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="10" width="600" height="30" as="geometry"/></mxCell>
+
+<!-- Column headers (shared) -->
+<mxCell id="3"  value="DB[0]&#xa;(0–7B)"   style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=center;" vertex="1" parent="1"><mxGeometry x="190" y="48" width="88" height="32" as="geometry"/></mxCell>
+<mxCell id="4"  value="DB[1]&#xa;(8–15B)"  style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=center;" vertex="1" parent="1"><mxGeometry x="283" y="48" width="88" height="32" as="geometry"/></mxCell>
+<mxCell id="5"  value="DB[2]&#xa;(16–23B)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=center;" vertex="1" parent="1"><mxGeometry x="376" y="48" width="88" height="32" as="geometry"/></mxCell>
+<mxCell id="6"  value="DB[3]&#xa;(24–31B)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=center;" vertex="1" parent="1"><mxGeometry x="469" y="48" width="88" height="32" as="geometry"/></mxCell>
+<mxCell id="7"  value="DB[4]&#xa;(32–39B)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=center;" vertex="1" parent="1"><mxGeometry x="562" y="48" width="88" height="32" as="geometry"/></mxCell>
+<mxCell id="8"  value="DB[5]&#xa;(40–47B)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=center;" vertex="1" parent="1"><mxGeometry x="655" y="48" width="88" height="32" as="geometry"/></mxCell>
+<mxCell id="9"  value="DB[6]&#xa;(48–55B)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=center;" vertex="1" parent="1"><mxGeometry x="748" y="48" width="88" height="32" as="geometry"/></mxCell>
+<mxCell id="10" value="DB[7]&#xa;(56–63B)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=center;" vertex="1" parent="1"><mxGeometry x="841" y="48" width="88" height="32" as="geometry"/></mxCell>
+
+<!-- ── 2-Way section ── -->
+<mxCell id="11" value="2-Way Interleaved   (NumInterleavedBank=2)   총 SRAM = 2 × 8 × 4 = 64개   depth=128" style="text;html=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="86" width="800" height="20" as="geometry"/></mxCell>
+
+<!-- Row labels -->
+<mxCell id="12" value="SB0&#xa;even sets&#xa;(0,2,4,…254)&#xa;depth=128" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="110" width="165" height="60" as="geometry"/></mxCell>
+<mxCell id="13" value="SB1&#xa;odd sets&#xa;(1,3,5,…255)&#xa;depth=128" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="175" width="165" height="60" as="geometry"/></mxCell>
+
+<!-- SB0 row: 8 cells (y=110, each 88×60, step=93) -->
+<mxCell id="20" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="190" y="110" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="21" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="283" y="110" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="22" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="376" y="110" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="23" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="469" y="110" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="24" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="562" y="110" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="25" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="655" y="110" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="26" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="748" y="110" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="27" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="841" y="110" width="88" height="60" as="geometry"/></mxCell>
+
+<!-- SB1 row: 8 cells (y=175) -->
+<mxCell id="30" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="190" y="175" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="31" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="283" y="175" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="32" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="376" y="175" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="33" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="469" y="175" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="34" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="562" y="175" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="35" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="655" y="175" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="36" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="748" y="175" width="88" height="60" as="geometry"/></mxCell>
+<mxCell id="37" value="128×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="841" y="175" width="88" height="60" as="geometry"/></mxCell>
+
+<!-- ── 4-Way section ── -->
+<mxCell id="38" value="" style="line;strokeColor=#999;" vertex="1" parent="1"><mxGeometry x="20" y="248" width="920" height="8" as="geometry"/></mxCell>
+<mxCell id="39" value="4-Way Interleaved ★  (NumInterleavedBank=4)   총 SRAM = 4 × 8 × 4 = 128개   depth=64" style="text;html=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="260" width="840" height="20" as="geometry"/></mxCell>
+
+<!-- Row labels (4-way) -->
+<mxCell id="40" value="SB0&#xa;(S%4=0)&#xa;depth=64" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="286" width="165" height="52" as="geometry"/></mxCell>
+<mxCell id="41" value="SB1&#xa;(S%4=1)&#xa;depth=64" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="343" width="165" height="52" as="geometry"/></mxCell>
+<mxCell id="42" value="SB2&#xa;(S%4=2)&#xa;depth=64" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="400" width="165" height="52" as="geometry"/></mxCell>
+<mxCell id="43" value="SB3&#xa;(S%4=3)&#xa;depth=64" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="457" width="165" height="52" as="geometry"/></mxCell>
+
+<!-- SB0 row (y=286) -->
+<mxCell id="50" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="190" y="286" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="51" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="283" y="286" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="52" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="376" y="286" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="53" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="469" y="286" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="54" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="562" y="286" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="55" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="655" y="286" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="56" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="748" y="286" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="57" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1"><mxGeometry x="841" y="286" width="88" height="52" as="geometry"/></mxCell>
+
+<!-- SB1 row (y=343) -->
+<mxCell id="60" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="190" y="343" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="61" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="283" y="343" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="62" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="376" y="343" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="63" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="469" y="343" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="64" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="562" y="343" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="65" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="655" y="343" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="66" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="748" y="343" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="67" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1"><mxGeometry x="841" y="343" width="88" height="52" as="geometry"/></mxCell>
+
+<!-- SB2 row (y=400) -->
+<mxCell id="70" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1"><mxGeometry x="190" y="400" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="71" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1"><mxGeometry x="283" y="400" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="72" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1"><mxGeometry x="376" y="400" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="73" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1"><mxGeometry x="469" y="400" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="74" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1"><mxGeometry x="562" y="400" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="75" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1"><mxGeometry x="655" y="400" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="76" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1"><mxGeometry x="748" y="400" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="77" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1"><mxGeometry x="841" y="400" width="88" height="52" as="geometry"/></mxCell>
+
+<!-- SB3 row (y=457) -->
+<mxCell id="80" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1"><mxGeometry x="190" y="457" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="81" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1"><mxGeometry x="283" y="457" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="82" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1"><mxGeometry x="376" y="457" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="83" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1"><mxGeometry x="469" y="457" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="84" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1"><mxGeometry x="562" y="457" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="85" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1"><mxGeometry x="655" y="457" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="86" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1"><mxGeometry x="748" y="457" width="88" height="52" as="geometry"/></mxCell>
+<mxCell id="87" value="64×66b&#xa;W0-W3(×4)" style="whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1"><mxGeometry x="841" y="457" width="88" height="52" as="geometry"/></mxCell>
+
+<!-- Total note -->
+<mxCell id="90" value="총 SRAM 비트 동일: 128 × 64 × 66 = 540,672 bits = 32 × 256 × 66  (면적 중립, 인스턴스 4×)" style="text;html=1;strokeColor=none;fillColor=#fff8dc;fontSize=11;fontStyle=2;align=left;spacingLeft=8;rounded=1;strokeColor=#d6b656;" vertex="1" parent="1"><mxGeometry x="20" y="525" width="920" height="28" as="geometry"/></mxCell>
+
+</root></mxGraphModel>
+</diagram>
+
+<!-- ================================================================
+     PAGE 3: Conflict Analysis  (Case A vs Case B)
+     ================================================================ -->
+<diagram id="p3" name="3. Conflict Analysis">
+<mxGraphModel pageWidth="1520" pageHeight="620" grid="0">
+<root>
+<mxCell id="0"/><mxCell id="1" parent="0"/>
+
+<!-- ── CASE A: 2-Way  CONFLICT ─────────────────────────────────── -->
+<!-- Panel background -->
+<mxCell id="2" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff0f0;strokeColor=#b85450;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="10" y="10" width="710" height="590" as="geometry"/></mxCell>
+<mxCell id="3" value="Case A: 2-Way Interleaved  —  ✗ CONFLICT" style="text;html=1;strokeColor=none;fillColor=none;fontSize=14;fontStyle=1;fontColor=#b85450;" vertex="1" parent="1"><mxGeometry x="20" y="18" width="690" height="26" as="geometry"/></mxCell>
+
+<!-- Bundle brackets -->
+<mxCell id="4" value="Bundle 0  (doubleline)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="30" y="52" width="270" height="30" as="geometry"/></mxCell>
+<mxCell id="5" value="Bundle 1  (doubleline)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="430" y="52" width="270" height="30" as="geometry"/></mxCell>
+
+<!-- Set boxes (y=90) -->
+<mxCell id="6"  value="Set 4&#xa;4%2=0→SB0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="30"  y="92" width="110" height="50" as="geometry"/></mxCell>
+<mxCell id="7"  value="Set 5&#xa;5%2=1→SB1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="185" y="92" width="110" height="50" as="geometry"/></mxCell>
+<mxCell id="8"  value="Set 6&#xa;6%2=0→SB0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="430" y="92" width="110" height="50" as="geometry"/></mxCell>
+<mxCell id="9"  value="Set 7&#xa;7%2=1→SB1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="585" y="92" width="110" height="50" as="geometry"/></mxCell>
+
+<!-- Sub-bank boxes (y=280) -->
+<mxCell id="10" value="Sub-bank 0&#xa;(even sets)&#xa;━━━━━━━━━&#xa;⚠ CONFLICT!&#xa;Set4 + Set6 동시 요청&#xa;singlePort → stall" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontStyle=1;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="30"  y="290" width="270" height="130" as="geometry"/></mxCell>
+<mxCell id="11" value="Sub-bank 1&#xa;(odd sets)&#xa;━━━━━━━━━&#xa;⚠ CONFLICT!&#xa;Set5 + Set7 동시 요청&#xa;singlePort → stall" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontStyle=1;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="420" y="290" width="270" height="130" as="geometry"/></mxCell>
+
+<!-- Arrows: Set4→SB0, Set5→SB1 (normal) -->
+<mxCell id="12" value="" style="endArrow=block;endFill=1;strokeColor=#6c8ebf;strokeWidth=2;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="85"  y="142" as="sourcePoint"/><mxPoint x="120" y="290" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="13" value="" style="endArrow=block;endFill=1;strokeColor=#d6b656;strokeWidth=2;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="240" y="142" as="sourcePoint"/><mxPoint x="555" y="290" as="targetPoint"/></mxGeometry></mxCell>
+<!-- Arrows: Set6→SB0, Set7→SB1 (conflict, red) -->
+<mxCell id="14" value="CONFLICT!" style="endArrow=block;endFill=1;strokeColor=#b85450;strokeWidth=2;fontColor=#b85450;fontStyle=1;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="485" y="142" as="sourcePoint"/><mxPoint x="200" y="290" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="15" value="CONFLICT!" style="endArrow=block;endFill=1;strokeColor=#b85450;strokeWidth=2;fontColor=#b85450;fontStyle=1;fontSize=10;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="640" y="142" as="sourcePoint"/><mxPoint x="620" y="290" as="targetPoint"/></mxGeometry></mxCell>
+
+<!-- Timeline -->
+<mxCell id="16" value="⏱ Timeline" style="text;html=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="30" y="435" width="120" height="20" as="geometry"/></mxCell>
+<mxCell id="17" value="Cycle N :" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=right;" vertex="1" parent="1"><mxGeometry x="30" y="460" width="70" height="18" as="geometry"/></mxCell>
+<mxCell id="18" value="Bundle 0 (Set4+5) → SB0, SB1  ✓" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1"><mxGeometry x="108" y="455" width="280" height="26" as="geometry"/></mxCell>
+<mxCell id="19" value="Bundle 1 (Set6+7) → BLOCKED ✗" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1"><mxGeometry x="398" y="455" width="280" height="26" as="geometry"/></mxCell>
+<mxCell id="20" value="Cycle N+1:" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=right;" vertex="1" parent="1"><mxGeometry x="30" y="490" width="70" height="18" as="geometry"/></mxCell>
+<mxCell id="21" value="Bundle 1 (Set6+7) → 1 cycle 지연" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1"><mxGeometry x="108" y="486" width="280" height="26" as="geometry"/></mxCell>
+<mxCell id="22" value="→ 실효 처리량 ≈ 1 bundle/cycle" style="text;html=1;strokeColor=none;fillColor=#fff0f0;fontSize=12;fontStyle=3;" vertex="1" parent="1"><mxGeometry x="30" y="526" width="680" height="24" as="geometry"/></mxCell>
+
+<!-- ── CASE B: 4-Way  NO CONFLICT ───────────────────────────────── -->
+<!-- Panel background -->
+<mxCell id="30" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0fff0;strokeColor=#82b366;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="790" y="10" width="710" height="590" as="geometry"/></mxCell>
+<mxCell id="31" value="Case B: 4-Way Interleaved  —  ✓ NO CONFLICT" style="text;html=1;strokeColor=none;fillColor=none;fontSize=14;fontStyle=1;fontColor=#2d7600;" vertex="1" parent="1"><mxGeometry x="800" y="18" width="690" height="26" as="geometry"/></mxCell>
+
+<!-- Bundle brackets -->
+<mxCell id="32" value="Bundle 0  (doubleline)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="810" y="52" width="270" height="30" as="geometry"/></mxCell>
+<mxCell id="33" value="Bundle 1  (doubleline)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="1210" y="52" width="270" height="30" as="geometry"/></mxCell>
+
+<!-- Set boxes -->
+<mxCell id="34" value="Set 4&#xa;4%4=0→SB0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="810"  y="92" width="110" height="50" as="geometry"/></mxCell>
+<mxCell id="35" value="Set 5&#xa;5%4=1→SB1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="960"  y="92" width="110" height="50" as="geometry"/></mxCell>
+<mxCell id="36" value="Set 6&#xa;6%4=2→SB2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="1210" y="92" width="110" height="50" as="geometry"/></mxCell>
+<mxCell id="37" value="Set 7&#xa;7%4=3→SB3" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="1360" y="92" width="110" height="50" as="geometry"/></mxCell>
+
+<!-- Sub-bank boxes (4 separate, y=290) -->
+<mxCell id="38" value="Sub-bank 0&#xa;━━━━━&#xa;Set 4 only&#xa;&#xa;✓ OK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="800"  y="290" width="145" height="120" as="geometry"/></mxCell>
+<mxCell id="39" value="Sub-bank 1&#xa;━━━━━&#xa;Set 5 only&#xa;&#xa;✓ OK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="955"  y="290" width="145" height="120" as="geometry"/></mxCell>
+<mxCell id="40" value="Sub-bank 2&#xa;━━━━━&#xa;Set 6 only&#xa;&#xa;✓ OK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="1205" y="290" width="145" height="120" as="geometry"/></mxCell>
+<mxCell id="41" value="Sub-bank 3&#xa;━━━━━&#xa;Set 7 only&#xa;&#xa;✓ OK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontStyle=1;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="1355" y="290" width="145" height="120" as="geometry"/></mxCell>
+
+<!-- Arrows (straight, each set to its own SB) -->
+<mxCell id="42" value="" style="endArrow=block;endFill=1;strokeColor=#6c8ebf;strokeWidth=2;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="865"  y="142" as="sourcePoint"/><mxPoint x="872"  y="290" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="43" value="" style="endArrow=block;endFill=1;strokeColor=#d6b656;strokeWidth=2;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="1015" y="142" as="sourcePoint"/><mxPoint x="1027" y="290" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="44" value="" style="endArrow=block;endFill=1;strokeColor=#82b366;strokeWidth=2;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="1265" y="142" as="sourcePoint"/><mxPoint x="1277" y="290" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="45" value="" style="endArrow=block;endFill=1;strokeColor=#9673a6;strokeWidth=2;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="1415" y="142" as="sourcePoint"/><mxPoint x="1427" y="290" as="targetPoint"/></mxGeometry></mxCell>
+
+<!-- Timeline -->
+<mxCell id="46" value="⏱ Timeline" style="text;html=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="810" y="435" width="120" height="20" as="geometry"/></mxCell>
+<mxCell id="47" value="Cycle N :" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=right;" vertex="1" parent="1"><mxGeometry x="810" y="460" width="70" height="18" as="geometry"/></mxCell>
+<mxCell id="48" value="Bundle 0 (Set4+5) → SB0, SB1  ✓" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1"><mxGeometry x="888" y="455" width="280" height="26" as="geometry"/></mxCell>
+<mxCell id="49" value="Bundle 1 (Set6+7) → SB2, SB3  ✓" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1"><mxGeometry x="888" y="486" width="280" height="26" as="geometry"/></mxCell>
+<mxCell id="50" value="→ 동시 서비스!  0 stall" style="text;html=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=3;" vertex="1" parent="1"><mxGeometry x="1180" y="462" width="300" height="26" as="geometry"/></mxCell>
+<mxCell id="51" value="→ 실효 처리량 = 2 bundles/cycle  ✓" style="text;html=1;strokeColor=none;fillColor=#f0fff0;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="810" y="526" width="680" height="24" as="geometry"/></mxCell>
+
+</root></mxGraphModel>
+</diagram>
+
+<!-- ================================================================
+     PAGE 4: Summary Table + Refill Conflict
+     ================================================================ -->
+<diagram id="p4" name="4. Summary Table">
+<mxGraphModel pageWidth="1100" pageHeight="640" grid="0">
+<root>
+<mxCell id="0"/><mxCell id="1" parent="0"/>
+
+<mxCell id="2" value="Interleaving 방식별 비교 요약" style="text;html=1;strokeColor=none;fillColor=none;fontSize=16;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="10" width="500" height="30" as="geometry"/></mxCell>
+
+<!-- Table header -->
+<mxCell id="3"  value=""                          style="whiteSpace=wrap;html=1;fillColor=#666;strokeColor=#333;fontColor=#fff;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20"  y="48" width="260" height="36" as="geometry"/></mxCell>
+<mxCell id="4"  value="Baseline&#xa;(no interleave)" style="whiteSpace=wrap;html=1;fillColor=#666;strokeColor=#333;fontColor=#fff;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="280" y="48" width="220" height="36" as="geometry"/></mxCell>
+<mxCell id="5"  value="2-Way Interleaved"          style="whiteSpace=wrap;html=1;fillColor=#666;strokeColor=#333;fontColor=#fff;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="500" y="48" width="220" height="36" as="geometry"/></mxCell>
+<mxCell id="6"  value="4-Way Interleaved ★"        style="whiteSpace=wrap;html=1;fillColor=#2d7600;strokeColor=#333;fontColor=#fff;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="720" y="48" width="340" height="36" as="geometry"/></mxCell>
+
+<!-- Row 1: Sub-bank 수 -->
+<mxCell id="10" value="Sub-bank 수"            style="whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20"  y="84" width="260" height="36" as="geometry"/></mxCell>
+<mxCell id="11" value="1"                      style="whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#666;fontSize=12;" vertex="1" parent="1"><mxGeometry x="280" y="84" width="220" height="36" as="geometry"/></mxCell>
+<mxCell id="12" value="2"                      style="whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#666;fontSize=12;" vertex="1" parent="1"><mxGeometry x="500" y="84" width="220" height="36" as="geometry"/></mxCell>
+<mxCell id="13" value="4"                      style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="720" y="84" width="340" height="36" as="geometry"/></mxCell>
+
+<!-- Row 2: SRAM depth -->
+<mxCell id="14" value="SRAM depth"             style="whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20"  y="120" width="260" height="36" as="geometry"/></mxCell>
+<mxCell id="15" value="256 rows"               style="whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#666;fontSize=12;" vertex="1" parent="1"><mxGeometry x="280" y="120" width="220" height="36" as="geometry"/></mxCell>
+<mxCell id="16" value="128 rows"               style="whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#666;fontSize=12;" vertex="1" parent="1"><mxGeometry x="500" y="120" width="220" height="36" as="geometry"/></mxCell>
+<mxCell id="17" value="64 rows"                style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="720" y="120" width="340" height="36" as="geometry"/></mxCell>
+
+<!-- Row 3: 총 SRAM 인스턴스 -->
+<mxCell id="18" value="총 SRAM 인스턴스"        style="whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20"  y="156" width="260" height="36" as="geometry"/></mxCell>
+<mxCell id="19" value="32"                     style="whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#666;fontSize=12;" vertex="1" parent="1"><mxGeometry x="280" y="156" width="220" height="36" as="geometry"/></mxCell>
+<mxCell id="20" value="64"                     style="whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#666;fontSize=12;" vertex="1" parent="1"><mxGeometry x="500" y="156" width="220" height="36" as="geometry"/></mxCell>
+<mxCell id="21" value="128"                    style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="720" y="156" width="340" height="36" as="geometry"/></mxCell>
+
+<!-- Row 4: 2-bundle single-line conflict -->
+<mxCell id="22" value="2-bundle single-line&#xa;conflict (sequential)" style="whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20"  y="192" width="260" height="40" as="geometry"/></mxCell>
+<mxCell id="23" value="100% ✗"                style="whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="280" y="192" width="220" height="40" as="geometry"/></mxCell>
+<mxCell id="24" value="0% ✓"                  style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="500" y="192" width="220" height="40" as="geometry"/></mxCell>
+<mxCell id="25" value="0% ✓"                  style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="720" y="192" width="340" height="40" as="geometry"/></mxCell>
+
+<!-- Row 5: 2-bundle doubleline conflict -->
+<mxCell id="26" value="2-bundle doubleline&#xa;conflict (sequential)" style="whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20"  y="232" width="260" height="40" as="geometry"/></mxCell>
+<mxCell id="27" value="100% ✗"                style="whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="280" y="232" width="220" height="40" as="geometry"/></mxCell>
+<mxCell id="28" value="~100% ✗"               style="whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="500" y="232" width="220" height="40" as="geometry"/></mxCell>
+<mxCell id="29" value="0% ✓"                  style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="720" y="232" width="340" height="40" as="geometry"/></mxCell>
+
+<!-- Row 6: random access conflict -->
+<mxCell id="30" value="2-bundle conflict&#xa;(random access)" style="whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20"  y="272" width="260" height="40" as="geometry"/></mxCell>
+<mxCell id="31" value="100% ✗"                style="whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="280" y="272" width="220" height="40" as="geometry"/></mxCell>
+<mxCell id="32" value="50% △"                 style="whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="500" y="272" width="220" height="40" as="geometry"/></mxCell>
+<mxCell id="33" value="25% △"                 style="whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="720" y="272" width="340" height="40" as="geometry"/></mxCell>
+
+<!-- Row 7: refill stall 영향 범위 -->
+<mxCell id="34" value="refill write stall&#xa;영향 범위" style="whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20"  y="312" width="260" height="40" as="geometry"/></mxCell>
+<mxCell id="35" value="전체 DataArray 100% block" style="whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1"><mxGeometry x="280" y="312" width="220" height="40" as="geometry"/></mxCell>
+<mxCell id="36" value="해당 SB만 block (50%)"    style="whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1"><mxGeometry x="500" y="312" width="220" height="40" as="geometry"/></mxCell>
+<mxCell id="37" value="해당 SB만 block (25%)"    style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="720" y="312" width="340" height="40" as="geometry"/></mxCell>
+
+<!-- Row 8: 총 SRAM 비트 -->
+<mxCell id="38" value="총 SRAM 비트 (면적)"      style="whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20"  y="352" width="260" height="36" as="geometry"/></mxCell>
+<mxCell id="39" value="540,672 bits"              style="whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#666;fontSize=11;" vertex="1" parent="1"><mxGeometry x="280" y="352" width="220" height="36" as="geometry"/></mxCell>
+<mxCell id="40" value="540,672 bits  (동일)"      style="whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#666;fontSize=11;" vertex="1" parent="1"><mxGeometry x="500" y="352" width="220" height="36" as="geometry"/></mxCell>
+<mxCell id="41" value="540,672 bits  (동일)"      style="whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1"><mxGeometry x="720" y="352" width="340" height="36" as="geometry"/></mxCell>
+
+<!-- Conclusion note -->
+<mxCell id="42" value="★ 2-Fetch 설계에는 4-Way Interleaved 필수 — 2-Way는 doubleline sequential에서 Baseline과 동일한 conflict 발생" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1"><mxGeometry x="20" y="402" width="1040" height="34" as="geometry"/></mxCell>
+
+<!-- ── Refill Conflict Diagram ── -->
+<mxCell id="50" value="Refill Write Conflict 비교" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="450" width="400" height="24" as="geometry"/></mxCell>
+
+<!-- Baseline refill -->
+<mxCell id="51" value="Baseline" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="480" width="100" height="20" as="geometry"/></mxCell>
+<mxCell id="52" value="WRITE (refill set X)&#xa;→ 전체 DataArray BLOCK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="20" y="502" width="460" height="50" as="geometry"/></mxCell>
+
+<!-- 4-Way refill -->
+<mxCell id="53" value="4-Way Interleaved" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="530" y="480" width="160" height="20" as="geometry"/></mxCell>
+<mxCell id="54" value="SB0&#xa;WRITE&#xa;(refill)&#xa;BLOCK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="530" y="502" width="100" height="70" as="geometry"/></mxCell>
+<mxCell id="55" value="SB1&#xa;READ&#xa;fetch S5&#xa;✓ OK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1"><mxGeometry x="638" y="502" width="100" height="70" as="geometry"/></mxCell>
+<mxCell id="56" value="SB2&#xa;READ&#xa;fetch S6&#xa;✓ OK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1"><mxGeometry x="746" y="502" width="100" height="70" as="geometry"/></mxCell>
+<mxCell id="57" value="SB3&#xa;READ&#xa;fetch S7&#xa;✓ OK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1"><mxGeometry x="854" y="502" width="100" height="70" as="geometry"/></mxCell>
+<mxCell id="58" value="SB0만 block → Bundle 1 (S6,S7)은 계속 서비스 가능" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=3;" vertex="1" parent="1"><mxGeometry x="530" y="578" width="540" height="20" as="geometry"/></mxCell>
+
+</root></mxGraphModel>
+</diagram>
+
+</mxfile>

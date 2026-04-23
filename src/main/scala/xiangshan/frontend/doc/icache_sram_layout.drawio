@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2450" pageHeight="460" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+
+    <!-- Title -->
+    <mxCell id="2" value="ICache DataArray SRAM Layout (32 SRAMs)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="70" y="12" width="700" height="34" as="geometry" />
+    </mxCell>
+
+    <!-- Depth double-arrow (left side) -->
+    <mxCell id="10" value="depth = 256 entries" style="endArrow=block;startArrow=block;endFill=1;startFill=1;fontSize=11;fontStyle=1;align=center;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="48" y="100" as="sourcePoint" />
+        <mxPoint x="48" y="300" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- Way 0 group box -->
+    <mxCell id="20" value="Way 0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;verticalAlign=top;arcSize=2;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="70" y="70" width="545" height="245" as="geometry" />
+    </mxCell>
+
+    <!-- Way 1 group box -->
+    <mxCell id="21" value="Way 1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;verticalAlign=top;arcSize=2;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="640" y="70" width="545" height="245" as="geometry" />
+    </mxCell>
+
+    <!-- Way 2 group box -->
+    <mxCell id="22" value="Way 2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;verticalAlign=top;arcSize=2;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="1210" y="70" width="545" height="245" as="geometry" />
+    </mxCell>
+
+    <!-- Way 3 group box -->
+    <mxCell id="23" value="Way 3" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;verticalAlign=top;arcSize=2;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="1780" y="70" width="545" height="245" as="geometry" />
+    </mxCell>
+
+    <!-- ============================================================ -->
+    <!-- Way 0 : Bank 0–7                                             -->
+    <!-- ============================================================ -->
+    <mxCell id="30" value="Bank 0&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="85" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="31" value="Bank 1&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="150" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="32" value="Bank 2&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="215" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="33" value="Bank 3&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="280" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="34" value="Bank 4&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="345" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="35" value="Bank 5&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="410" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="36" value="Bank 6&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="475" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="37" value="Bank 7&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="540" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+
+    <!-- ============================================================ -->
+    <!-- Way 1 : Bank 0–7                                             -->
+    <!-- ============================================================ -->
+    <mxCell id="40" value="Bank 0&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="655" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="41" value="Bank 1&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="720" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="42" value="Bank 2&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="785" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="43" value="Bank 3&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="850" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="44" value="Bank 4&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="915" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="45" value="Bank 5&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="980" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="46" value="Bank 6&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1045" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="47" value="Bank 7&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1110" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+
+    <!-- ============================================================ -->
+    <!-- Way 2 : Bank 0–7                                             -->
+    <!-- ============================================================ -->
+    <mxCell id="50" value="Bank 0&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1225" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="51" value="Bank 1&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1290" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="52" value="Bank 2&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1355" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="53" value="Bank 3&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1420" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="54" value="Bank 4&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1485" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="55" value="Bank 5&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1550" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="56" value="Bank 6&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1615" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="57" value="Bank 7&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1680" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+
+    <!-- ============================================================ -->
+    <!-- Way 3 : Bank 0–7                                             -->
+    <!-- ============================================================ -->
+    <mxCell id="60" value="Bank 0&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1795" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="61" value="Bank 1&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1860" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="62" value="Bank 2&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1925" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="63" value="Bank 3&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1990" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="64" value="Bank 4&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="2055" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="65" value="Bank 5&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="2120" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="66" value="Bank 6&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="2185" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="67" value="Bank 7&#xa;8B&#xa;(66b)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="2250" y="100" width="60" height="200" as="geometry" />
+    </mxCell>
+
+    <!-- ============================================================ -->
+    <!-- Annotations below Way 0                                      -->
+    <!-- ============================================================ -->
+
+    <!-- "8B" width arrow: spans one SRAM (Bank 0 of Way 0) -->
+    <mxCell id="70" value="8B (66b raw)" style="endArrow=block;startArrow=block;endFill=1;startFill=1;fontSize=10;align=center;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="85" y="322" as="sourcePoint" />
+        <mxPoint x="145" y="322" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- "64B cacheline" arrow: spans all 8 banks of Way 0 -->
+    <mxCell id="71" value="8 banks × 8B = 64B  (1 cacheline)" style="endArrow=block;startArrow=block;endFill=1;startFill=1;fontSize=11;fontStyle=1;align=center;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="85" y="352" as="sourcePoint" />
+        <mxPoint x="600" y="352" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- ============================================================ -->
+    <!-- Info / legend box (bottom-right)                             -->
+    <!-- ============================================================ -->
+    <mxCell id="80" value="nSets = 256  |  nWays = 4  |  DataBanks = 8&#xa;DataSramWidth = 66b  (64b data + 1b parity + 1b pad)&#xa;Total: 32 SRAMs  |  Effective capacity: 64 KB" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontSize=11;align=left;spacingLeft=10;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="1580" y="336" width="790" height="66" as="geometry" />
+    </mxCell>
+
+  </root>
+</mxGraphModel>
