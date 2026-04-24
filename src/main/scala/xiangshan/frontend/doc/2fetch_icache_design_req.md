@@ -23,9 +23,10 @@
 11. **Refill/read hazard 증가**: refill write와 main read가 같은 cycle에 같은 set/sub-bank를 만날 때 old/new data 우선순위와 stall policy를 명확히 정해야 함
 12. **ECC / parity recovery 복잡도 증가**: bundle별로 ECC error가 독립적으로 발생할 수 있어 flush, refetch, exception 정책이 더 세분화됨
 13. **Prefetch pollution / fairness 문제**: prefetch MSHR만 크게 늘리면 useless prefetch가 demand fetch 또는 DCache traffic을 밀어내어 L2 admission 효율을 저하시킬 수 있음
-14. **TLB / PMP path의 hidden bottleneck**: cache access BW만 2배가 되어도 translation / permission path가 그대로면 실제 fetch throughput은 거기서 제한될 수 있음
+14. **TLB / PMP path — CAM 기반으로 2× lookup 자연 지원**: iTLB와 PMP는 모두 CAM(Content Addressable Memory) 구조이므로, 2× concurrent lookup은 comparator 회로 2×만으로 달성 가능. SRAM처럼 read port 수에 의한 구조적 병목이 없어 PrefetchPipe 전체 경로(TLB·PMP 포함)를 fully 2-wide로 확장해도 타이밍 영향이 최소화됨
 15. **Refill completion serialization 한계**: miss admission은 늘어나더라도 refill completion이 여전히 1/cycle이면 tail latency와 MSHR occupancy가 기대만큼 개선되지 않을 수 있음
 16. **Timing / power / verification 부담 증가**: control fanout, 작은 SRAM instance 증가, state-space explosion 때문에 타이밍 수렴과 검증 난이도가 크게 상승함
+17. **Adjacent 2-bundle miss의 single-MSHR merge 최적화 필요**: bundle 0이 not taken이고 bundle 1이 그 subsequent address이며, 두 fetch bundle의 총 크기 합이 64B 이하이면 miss 시 MSHR를 2개 따로 할당하지 않고 **single MSHR entry**로 merge하여 entry pressure와 duplicate refill traffic을 줄일 수 있음
 
 즉, 2-Fetch ICache는 단순히 MainPipe 입력 BW만 2배로 만드는 문제가 아니다.  
 DataArray / WayLookup / MissUnit / PrefetchPipe뿐 아니라 FTQ-IFU 계약, replacer correctness, L2 admission policy, verification strategy까지 함께 재설계해야 하는 구조 변경이다.
@@ -361,56 +362,60 @@ when(s1_flush_1 && !s1_flush_0): { s1_valid[1] := false; s1_b1_resp_buf_valid :=
 
 ---
 
-### 5.2 PrefetchPipe — 2-Wide Hit Path
+### 5.2 PrefetchPipe — Fully 2-Wide
 
 #### 설계 방향
 
-prefetch miss 경로 MSHR만 2배 (NumPrefetchMshr 10→20), hit 경로(MetaArray read)는 2-wide 확장.  
-miss FSM은 1개 유지 (TLB miss retry 로직 중복 없음).
-
-#### TLB / PMP Bottleneck 대응 (Issue #14)
-
-PrefetchPipe 2-wide는 iTLB에 2 lookups/cycle을 요구한다.
-
-**iTLB 용량 요구사항 분석:**
+iTLB와 PMP가 **CAM 기반**이므로, PrefetchPipe 전체 경로를 **fully 2-wide**로 확장한다.
 
 ```
-Baseline: 1 TLB req/cycle (PrefetchPipe S0)
-2-Fetch:  2 TLB req/cycle
-
-iTLB 구조 옵션:
-  A. 2-read-port iTLB SRAM: 면적 ~2×, 타이밍 악화 가능
-  B. 2-way partitioned iTLB: 각 파티션이 독립 read port (홀짝 분기)
-     → vPN[0]으로 partition select → partition 0, 1 각 1 req/cycle
-     → sequential prefetch는 거의 항상 다른 파티션 → conflict ~0%
-  C. 파이프라인 iTLB: 2-stage lookup, 1 req/cycle → throughput 부족
+CAM (Content Addressable Memory) 특성:
+  - 모든 entry를 query와 병렬 비교 (combinational match)
+  - 2개 동시 lookup = comparator 회로 2× 추가만으로 달성
+  - SRAM처럼 read port 수에 의한 구조적 병목 없음
+  - iTLB miss (page table walk) 도 2 slot 독립 처리 가능
 ```
 
-**권장**: Option B (2-way partitioned iTLB). PrefetchPipe의 2 slots를 각 파티션에 배정.  
-TLB miss는 파티션별 독립 처리. 비용: iTLB SRAM 인스턴스 2×, 면적 영향 소폭.
+이로 인해:
+- TLB: 2 lookup/cycle — 2× comparator array, 구조 변경 없음
+- PMP: 2 check/cycle — 2× rule comparator bank, 조합 논리 1 cycle 미만 유지
+- MetaArray: 4 reads/cycle — 4-interleaved bank 활용 (§4.2)
+- miss FSM: **2-slot 독립 FSM** (TLB miss retry 각 slot 독립 처리)
 
-**PMP 대응:**
+WayLookup 생산(2 entries/cycle)과 MainPipe 소비(2 entries/cycle)가 **균형** 달성.  
+NumPrefetchMshr=20은 2× miss path BW를 further 보완한다.
+
+#### TLB / PMP CAM 구조 확장 (Issue #14 해소)
 
 ```
-PMP check는 combinational (pAddr 기준 rule matching)
-2-bundle → 2 pAddr → 2× comparator array
-면적: PMP rule 수 × 2× comparators → 허용 범위 (PMP rule 수 보통 16 미만)
-타이밍: PMP latency는 1 cycle 미만 → 2-wide expansion은 타이밍 영향 없음
+iTLB (CAM 기반):
+  Baseline: comparator array × N_entries, 1 query/cycle
+  2-Fetch:  comparator array × N_entries × 2 set (slot 0, slot 1 독립)
+  → 2 동시 virtual address → 2 독립 physical tag 반환
+  → miss 시 각 slot 독립적으로 page table walk (PTW) 발행
+  → 면적: ~2×, 타이밍: comparator 병렬화 → critical path 증가 없음
+
+PMP (combinational, CAM 기반):
+  Baseline: N_rules × pAddr comparator, 1 check/cycle
+  2-Fetch:  N_rules × pAddr comparator × 2 set
+  → 2 pAddr 동시 검사, 결과 1 cycle 미만
+  → PMP rule 수 16 이하 시 면적 영향 미미
 ```
 
 #### S0/S1/S2 변경 사항
 
 ```
 S0: 2개 prefetch request 동시 수신 (FTQ prefetch req × 2)
-    → MetaArray: 4 reads/cycle (2 requests × 2 ports) — 4-interleaved bank 활용
-    → iTLB: 2 partitioned requests (req[0] → partition[vPN_0[0]], req[1] → partition[vPN_1[0]])
-    → PMP: 2 independent checks
+    → MetaArray: 4 reads/cycle (2 requests × PortNumber=2) — 4-interleaved bank
+    → iTLB:     2 independent CAM lookups (req[0], req[1] 동시)
+    → PMP:      2 independent combinational checks
 
-S1 FSM: 2-slot (slot 0, slot 1 독립 FSM state)
+S1 FSM: 2-slot 완전 독립 (slot 0, slot 1)
     → {tlbValid, sramValid, waymask, pTag, exception} 각 slot 독립 레지스터
-    → enqueue는 slot 0 → slot 1 순서 보장
+    → TLB miss 시 해당 slot만 ItlbResend state — 다른 slot 진행에 영향 없음
+    → enqueue 순서: slot 0 → slot 1 (WayLookup FIFO ordering 유지)
 
-S2: miss인 slot → MissUnit prefetch req (최대 2개/cycle)
+S2: miss인 slot 각각 MissUnit prefetch req 발행 (최대 2개/cycle)
     → NumPrefetchMshr=20으로 흡수
 ```
 
@@ -860,7 +865,7 @@ val dynamicPrefetchMSHRCap =
 | WayLookup | `updateStall[readPtr+1]` 체크 | 64-entry scan (pre-compute 필수) |
 | PrefetchPipe S1 | 2-slot FSM enqueue priority | 독립 FSM ×2 + 순서화 로직 |
 | MissUnit | 8-MSHR free-detect priority encoder | 기존 4-bit → 8-bit encoder |
-| iTLB | 2-way partitioned dual lookup | partition select + 2× CAM |
+| iTLB | 2× CAM comparator lookup | CAM 구조상 comparator array 2×만 추가, 구조 변경 없음, critical path 증가 없음 |
 | Replacer | 4-touch 충돌 감지 + arbitration | PopCount + priority mux |
 | ECC | metaFlush 4 port arbitration per bank | 최대 4 flush req → bank arbiter |
 
@@ -874,7 +879,7 @@ val dynamicPrefetchMSHRCap =
 
 4. **PrefetchPipe 2-slot FSM**: slot별 독립 계산 후 마지막 enqueue arbitration만 합산. critical path를 slot 내부에 국한.
 
-5. **iTLB 2-way partition 타이밍**: partition select가 vPN[0] 1비트이므로 SRAM enable 경로에 미치는 영향 최소.
+5. **iTLB 2× CAM lookup 타이밍**: CAM 구조이므로 2번째 lookup용 comparator array를 병렬로 추가하는 것이 전부. critical path는 단일 CAM lookup과 동일하게 유지됨. SRAM-based TLB라면 read port 추가가 필요했겠지만 CAM은 해당 없음.
 
 ### 8.3 Power 분석 (Issue #16)
 
@@ -1161,7 +1166,7 @@ sequenceDiagram
 | 14 | Refill write와 MainPipe read 동일 sub-bank 충돌 빈도 | #11 | 중간 | MSHR bypass로 대부분 흡수, bypass miss 시 1 cycle stall |
 | 15 | 2-bundle ECC error 동시 발생: metaFlush 4 port 타이밍 | #12 | 중간 | metaFlush bank arbiter per 4-bank |
 | 16 | prefetchMSHR=20 → L2 BW 독점 위험 | #13 | 높음 | demand 점유율 기반 동적 throttle (§5.4) |
-| 17 | iTLB 2-way partition 시 partition 간 eviction 불균형 | #14 | 낮음 | 동적 eviction rate 모니터링, 불균형 시 재분배 정책 검토 |
+| 17 | iTLB 2× CAM 면적 증가 (comparator 2×) 가 power budget에 영향 | #14 | 낮음 | CAM entry 수 제한(iTLB size 유지)으로 흡수 가능, partitioning 불필요 |
 | 18 | Refill completion serialization: 8 MSHR full → tail latency spike | #15 | 중간 | TileLink 2-channel 중장기 검토 (§5.4 §7) |
 | 19 | 동적 전력 2× → clock frequency target 달성 난이도 증가 | #16 | 높음 | sub-bank clock gate (withClockGate=true), 저전력 SRAM macro |
 | 20 | Verification state-space 4~8× 증가 → regression 시간 급증 | #16 | 높음 | formal property (§8.4) 우선 정의, simulation regression 병렬화 |
