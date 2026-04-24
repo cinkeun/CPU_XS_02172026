@@ -17,16 +17,16 @@
 5. **Arbitration 복잡도**: 2 bundle × (TLB hit/miss × Cache hit/miss) 조합, FTQ backpressure 케이스 증가
 6. **FTQ/IFU 인터페이스 계약 변화**: ICache만 2-bundle로 바뀌면 충분하지 않고, FTQ req 포맷·IFU resp 포맷·decode 소비 방식도 함께 정의되어야 함
 7. **`PortNumber=2` 의미 혼동 위험**: 기존 `PortNumber=2`는 "한 bundle 내 doubleline access"인데, 여기에 "2 bundle/cycle" 축이 추가되어 구현자가 두 축을 혼용할 가능성 존재
-8. **Duplicate request merge 필요**: 두 bundle이 같은 cacheline을 동시에 요구할 경우 read/miss를 merge하지 않으면 bank conflict와 MSHR pressure가 불필요하게 증가
+8. **Duplicate request merge 필요**: 두 bundle의 `blkPAddr`가 동일할 경우(같은 64B cacheline) DataArray read와 MSHR 할당을 각각 merge하지 않으면 bank conflict와 MSHR pressure가 불필요하게 증가. merge 판정 기준은 `bundle0.blkPAddr == bundle1.blkPAddr`이며, "sequential adjacent"나 "크기 합 ≤ 64B"는 이 조건의 충분조건이 아님 (→ §5.1, §5.4)
 9. **WayLookup flush / update correctness 악화**: dual-consume 구조에서는 BPU stage3 flush, refill update, exception entry, rollback rule이 기존보다 복잡해짐
 10. **Replacer 일관성 문제**: DataArray bank 구조가 바뀌면 replacer도 storage bank 기준이 아니라 logical set 기준으로 동작하도록 재정의해야 함
 11. **Refill/read hazard 증가**: refill write와 main read가 같은 cycle에 같은 set/sub-bank를 만날 때 old/new data 우선순위와 stall policy를 명확히 정해야 함
 12. **ECC / parity recovery 복잡도 증가**: bundle별로 ECC error가 독립적으로 발생할 수 있어 flush, refetch, exception 정책이 더 세분화됨
 13. **Prefetch pollution / fairness 문제**: prefetch MSHR만 크게 늘리면 useless prefetch가 demand fetch 또는 DCache traffic을 밀어내어 L2 admission 효율을 저하시킬 수 있음
-14. **TLB / PMP path — CAM 기반으로 2× lookup 자연 지원**: iTLB와 PMP는 모두 CAM(Content Addressable Memory) 구조이므로, 2× concurrent lookup은 comparator 회로 2×만으로 달성 가능. SRAM처럼 read port 수에 의한 구조적 병목이 없어 PrefetchPipe 전체 경로(TLB·PMP 포함)를 fully 2-wide로 확장해도 타이밍 영향이 최소화됨
+14. **TLB / PMP path — hit는 CAM 2×로 자연 해소, miss는 PTW 직렬화 필요**: iTLB·PMP는 CAM 구조이므로 2× concurrent lookup은 comparator 회로 2×만으로 달성 가능(hit path). 단, TLB miss 시 PTW outbound 채널은 1-wide를 유지하고 2-entry pending buffer로 직렬화한다. 두 slot이 동일 VPN을 miss하면 PTW req를 1개로 merge해 불필요한 duplicate walk를 막을 수 있음 (→ §5.2 PTW Request Serialization)
 15. **Refill completion serialization 한계**: miss admission은 늘어나더라도 refill completion이 여전히 1/cycle이면 tail latency와 MSHR occupancy가 기대만큼 개선되지 않을 수 있음
 16. **Timing / power / verification 부담 증가**: control fanout, 작은 SRAM instance 증가, state-space explosion 때문에 타이밍 수렴과 검증 난이도가 크게 상승함
-17. **Adjacent 2-bundle miss의 single-MSHR merge 최적화 필요**: bundle 0이 not taken이고 bundle 1이 그 subsequent address이며, 두 fetch bundle의 총 크기 합이 64B 이하이면 miss 시 MSHR를 2개 따로 할당하지 않고 **single MSHR entry**로 merge하여 entry pressure와 duplicate refill traffic을 줄일 수 있음
+17. **#8 MSHR 구현 시 merge 조건 주의**: same-cacheline miss 시 single MSHR entry로 merge해야 하며, 판정은 반드시 `bundle0.blkPAddr == bundle1.blkPAddr`로 해야 한다. "bundle 크기 합 ≤ 64B"나 "not taken + sequential"은 판정 기준이 아님 — bundle 0이 cacheline 경계 근처에서 시작하면 크기 합이 작아도 두 bundle이 서로 다른 cacheline에 걸칠 수 있다 (→ §5.4 Duplicate Merge)
 
 즉, 2-Fetch ICache는 단순히 MainPipe 입력 BW만 2배로 만드는 문제가 아니다.  
 DataArray / WayLookup / MissUnit / PrefetchPipe뿐 아니라 FTQ-IFU 계약, replacer correctness, L2 admission policy, verification strategy까지 함께 재설계해야 하는 구조 변경이다.
@@ -388,17 +388,22 @@ NumPrefetchMshr=20은 2× miss path BW를 further 보완한다.
 #### TLB / PMP CAM 구조 확장 (Issue #14 해소)
 
 ```
-iTLB (CAM 기반):
+iTLB (CAM 기반) — hit path:
   Baseline: comparator array × N_entries, 1 query/cycle
   2-Fetch:  comparator array × N_entries × 2 set (slot 0, slot 1 독립)
   → 2 동시 virtual address → 2 독립 physical tag 반환
-  → miss 시 각 slot 독립적으로 page table walk (PTW) 발행
   → 면적: ~2×, 타이밍: comparator 병렬화 → critical path 증가 없음
+
+iTLB — miss path (PTW 직렬화):
+  2 slot이 동시에 miss하더라도 PTW outbound 채널은 1-wide 유지
+  → 2-entry pending buffer로 PTW req 직렬화 (slot 0 우선)
+  → 두 slot이 동일 VPN miss → PTW req 1개만 발행, 응답 시 두 slot 동시 갱신
+  (세부 설계: §5.2 PTW Request Serialization)
 
 PMP (combinational, CAM 기반):
   Baseline: N_rules × pAddr comparator, 1 check/cycle
   2-Fetch:  N_rules × pAddr comparator × 2 set
-  → 2 pAddr 동시 검사, 결과 1 cycle 미만
+  → 2 pAddr 동시 검사, 결과 1 cycle 미만, miss 개념 없음 (fault → exception)
   → PMP rule 수 16 이하 시 면적 영향 미미
 ```
 
@@ -412,7 +417,9 @@ S0: 2개 prefetch request 동시 수신 (FTQ prefetch req × 2)
 
 S1 FSM: 2-slot 완전 독립 (slot 0, slot 1)
     → {tlbValid, sramValid, waymask, pTag, exception} 각 slot 독립 레지스터
-    → TLB miss 시 해당 slot만 ItlbResend state — 다른 slot 진행에 영향 없음
+    → TLB hit:  즉시 pTag 확정, 해당 slot 진행
+    → TLB miss: ItlbResend state 진입, PTW pending buffer에 req 적재
+                PTW outbound 채널은 1-wide → slot 0 우선 발행 (§5.2 PTW Serialization)
     → enqueue 순서: slot 0 → slot 1 (WayLookup FIFO ordering 유지)
 
 S2: miss인 slot 각각 MissUnit prefetch req 발행 (최대 2개/cycle)
@@ -423,12 +430,64 @@ S2: miss인 slot 각각 MissUnit prefetch req 발행 (최대 2개/cycle)
 
 WayLookup enqueue 순서: slot 0 완료 후에만 slot 1 enqueue 허용.
 
-| Slot 0 TLB | Slot 1 TLB | 처리 |
-|-----------|-----------|------|
-| hit | hit | 동시 enqueue 가능 |
-| hit | miss | Slot 0 즉시 enqueue, Slot 1은 TLB 해소 후 enqueue |
-| miss | hit | Slot 1 대기 (Slot 0 먼저). Slot 0 TLB 해소 후 함께 enqueue |
-| miss | miss | 각 TLB 해소 후 Slot 0 → Slot 1 순서 enqueue |
+| Slot 0 TLB | Slot 1 TLB | PTW 발행 | WayLookup enqueue |
+| --------- | --------- | ------- | ----------------- |
+| hit | hit | 없음 | 동시 enqueue 가능 |
+| hit | miss | slot 1 → PTW (1개) | Slot 0 즉시, Slot 1은 PTW 완료 후 |
+| miss | hit | slot 0 → PTW (1개) | Slot 1 대기. Slot 0 PTW 완료 후 함께 enqueue |
+| miss | miss (다른 VPN) | slot 0 먼저, slot 1은 buffer 대기 | 각 PTW 완료 후 Slot 0 → Slot 1 순서 |
+| miss | miss (같은 VPN) | PTW req 1개 (dedup) | 단일 PTW 응답 후 두 slot 동시 TLB 갱신, Slot 0 → Slot 1 순서 enqueue |
+
+#### PTW Request Serialization
+
+**문제**: 2-slot PrefetchPipe에서 두 slot이 동시에 TLB miss하면 cycle당 최대 2개의 PTW request가 발생한다. 그러나 PTW outbound 채널을 2-wide로 확장하는 것은 불필요하고 PTW 내부 설계 변경도 크다.
+
+##### 해결: 2-entry PTW pending buffer + 1-wide 채널 유지
+
+```
+// PrefetchPipe S1 — PTW pending buffer (2 entries)
+ptw_pending: Vec[2, Valid[PTWReqEntry]]
+  PTWReqEntry: { vpn: VPN, vSetIdx: UInt, slot_id: UInt(1.W) }
+
+// 동시 miss 시 적재
+when(slot0_tlb_miss && !slot1_tlb_miss):
+  ptw_pending[0] := {vpn=slot0_vpn, id=0}
+
+when(!slot0_tlb_miss && slot1_tlb_miss):
+  ptw_pending[0] := {vpn=slot1_vpn, id=1}
+
+when(slot0_tlb_miss && slot1_tlb_miss):
+  val same_vpn = (slot0_vpn === slot1_vpn)
+  ptw_pending[0] := {vpn=slot0_vpn, id=0}
+  when(!same_vpn):
+    ptw_pending[1] := {vpn=slot1_vpn, id=1}
+  // same_vpn이면 entry 1개만 (dedup)
+
+// PTW 채널 arbitration (1-wide, head-of-queue 우선)
+io.ptw_req.valid := ptw_pending[0].valid
+io.ptw_req.bits  := ptw_pending[0].bits
+when(io.ptw_req.fire):
+  ptw_pending[0] := ptw_pending[1]   // shift
+  ptw_pending[1].valid := false
+
+// PTW 응답 라우팅 — VPN 매칭으로 해당 slot(들) 갱신
+when(io.ptw_resp.valid):
+  val wake0 = (io.ptw_resp.bits.vpn === slot0_pending_vpn) && slot0_in_ItlbResend
+  val wake1 = (io.ptw_resp.bits.vpn === slot1_pending_vpn) && slot1_in_ItlbResend
+  when(wake0): slot0_tlb_update := true   // TLB 갱신 후 slot 0 retry
+  when(wake1): slot1_tlb_update := true   // TLB 갱신 후 slot 1 retry
+  // same-VPN dedup 케이스: wake0 && wake1 동시 가능
+```
+
+##### 추가 고려 사항
+
+1. **PTW 내부 outstanding 수**: XiangShan PTW가 다수의 outstanding walk를 지원하더라도, pending buffer를 두어 PrefetchPipe 측에서 back-pressure를 명시적으로 관리하는 것이 더 안전하다.
+
+2. **Same-VPN dedup 효과**: sequential prefetch에서 인접 bundle들은 같은 4KB 페이지 안에 있을 가능성이 높다. 이 경우 두 slot의 VPN이 동일 → PTW request 절반으로 감소.
+
+3. **ItlbResend state에서 slot 1 blocking**: slot 0이 ItlbResend 상태일 때 slot 1이 새로운 TLB miss를 발생시키면, pending buffer[1]에 적재되고 slot 0의 PTW가 accepted된 후 buffer[0]으로 올라와 발행된다. slot 1의 WayLookup enqueue는 slot 0 완료 이후이므로 ordering 위반 없음.
+
+4. **PMP miss는 없음**: PMP는 purely combinational이므로 pending buffer가 필요 없다. PMP fault는 exception으로 처리되어 해당 slot의 WayLookup entry에 exception 표시 후 enqueue됨.
 
 ---
 
