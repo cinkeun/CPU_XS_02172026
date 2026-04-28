@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net">
+<diagram id="p1" name="MetaArray SRAM Layout">
+<mxGraphModel pageWidth="1460" pageHeight="780" grid="0">
+<root>
+<mxCell id="0"/>
+<mxCell id="1" parent="0"/>
+
+<!-- ── Title ── -->
+<mxCell id="2" value="ICache MetaArray SRAM Layout  (4 SRAMs + 2 ValidArrays)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="1">
+  <mxGeometry x="20" y="10" width="900" height="30" as="geometry"/>
+</mxCell>
+
+<!-- ══════════════════════════════════════════════════════════════
+     Address Decomposition
+     ══════════════════════════════════════════════════════════════ -->
+
+<!-- outer box -->
+<mxCell id="10" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontColor=#333;" vertex="1" parent="1">
+  <mxGeometry x="20" y="50" width="1400" height="88" as="geometry"/>
+</mxCell>
+<mxCell id="11" value="Address Decomposition  (vAddr → vSetIdx → sub-bank + row)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1;align=left;" vertex="1" parent="1">
+  <mxGeometry x="28" y="53" width="600" height="18" as="geometry"/>
+</mxCell>
+
+<!-- vAddr bit fields (total 48b shown) -->
+<!-- pTag [47:12] = 36b -->
+<mxCell id="12" value="pTag&#xa;[47:12]&#xa;36b" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+  <mxGeometry x="28" y="74" width="160" height="54" as="geometry"/>
+</mxCell>
+<!-- row_addr [13:7] = vSetIdx[7:1] = 7b -->
+<mxCell id="13" value="row_addr  [13:7] = vSetIdx[7:1]   (7b → 0~127)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+  <mxGeometry x="192" y="74" width="350" height="54" as="geometry"/>
+</mxCell>
+<!-- sub_bank_sel [6] = vSetIdx[0] = 1b -->
+<mxCell id="14" value="SB sel [6]&#xa;vSetIdx[0]&#xa;1b" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+  <mxGeometry x="546" y="74" width="110" height="54" as="geometry"/>
+</mxCell>
+<!-- block offset [5:0] = 6b -->
+<mxCell id="15" value="block offset [5:0]   6b  (not used for meta index)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999;fontSize=11;fontStyle=0;fontColor=#888;" vertex="1" parent="1">
+  <mxGeometry x="660" y="74" width="350" height="54" as="geometry"/>
+</mxCell>
+<!-- rule note -->
+<mxCell id="16" value="vSetIdx[0]=0 → Sub-bank 0  (even sets)    |    vSetIdx[0]=1 → Sub-bank 1  (odd sets)    |    row = vSetIdx[7:1]" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;align=left;" vertex="1" parent="1">
+  <mxGeometry x="1020" y="82" width="390" height="38" as="geometry"/>
+</mxCell>
+
+<!-- depth arrow (left of SBs) -->
+<mxCell id="17" value="depth = 128 rows" style="endArrow=block;startArrow=block;endFill=1;startFill=1;fontSize=11;fontStyle=1;align=center;" edge="1" parent="1">
+  <mxGeometry relative="1" as="geometry">
+    <mxPoint x="16" y="210" as="sourcePoint"/>
+    <mxPoint x="16" y="470" as="targetPoint"/>
+  </mxGeometry>
+</mxCell>
+
+<!-- ══════════════════════════════════════════════════════════════
+     Sub-bank 0
+     ══════════════════════════════════════════════════════════════ -->
+<mxCell id="20" value="Sub-bank 0  —  even sets  (0, 2, 4, … 254)&#xa;vSetIdx[0] = 0  |  row = vSetIdx[7:1]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;verticalAlign=top;arcSize=2;strokeWidth=2;" vertex="1" parent="1">
+  <mxGeometry x="28" y="155" width="680" height="330" as="geometry"/>
+</mxCell>
+
+<!-- SRAM 0A: waySplit 0 (Way 0 & 1) -->
+<mxCell id="21" value="SRAM 0-A&#xa;waySplit 0  (Way 0 &amp; 1)&#xa;━━━━━━━━━━━━━━━━━━&#xa;128 rows × 2 ways × 69b&#xa;&#xa;entry = meta(68b) + parity(1b)&#xa;  phyTag     : 36b&#xa;  maybeRvcMap: 32b&#xa;  parity     :  1b" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;verticalAlign=top;arcSize=3;" vertex="1" parent="1">
+  <mxGeometry x="48" y="207" width="290" height="248" as="geometry"/>
+</mxCell>
+
+<!-- SRAM 0B: waySplit 1 (Way 2 & 3) -->
+<mxCell id="22" value="SRAM 0-B&#xa;waySplit 1  (Way 2 &amp; 3)&#xa;━━━━━━━━━━━━━━━━━━&#xa;128 rows × 2 ways × 69b&#xa;&#xa;entry = meta(68b) + parity(1b)&#xa;  phyTag     : 36b&#xa;  maybeRvcMap: 32b&#xa;  parity     :  1b" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;verticalAlign=top;arcSize=3;" vertex="1" parent="1">
+  <mxGeometry x="368" y="207" width="290" height="248" as="geometry"/>
+</mxCell>
+
+<!-- ValidArray 0 -->
+<mxCell id="23" value="validArray[0]  —  RegInit  (128 × 4b = 512b, register not SRAM)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontStyle=1;align=left;spacingLeft=8;" vertex="1" parent="1">
+  <mxGeometry x="48" y="466" width="610" height="26" as="geometry"/>
+</mxCell>
+
+<!-- ══════════════════════════════════════════════════════════════
+     Sub-bank 1
+     ══════════════════════════════════════════════════════════════ -->
+<mxCell id="30" value="Sub-bank 1  —  odd sets  (1, 3, 5, … 255)&#xa;vSetIdx[0] = 1  |  row = vSetIdx[7:1]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;verticalAlign=top;arcSize=2;strokeWidth=2;" vertex="1" parent="1">
+  <mxGeometry x="736" y="155" width="680" height="330" as="geometry"/>
+</mxCell>
+
+<!-- SRAM 1A: waySplit 0 (Way 0 & 1) -->
+<mxCell id="31" value="SRAM 1-A&#xa;waySplit 0  (Way 0 &amp; 1)&#xa;━━━━━━━━━━━━━━━━━━&#xa;128 rows × 2 ways × 69b&#xa;&#xa;entry = meta(68b) + parity(1b)&#xa;  phyTag     : 36b&#xa;  maybeRvcMap: 32b&#xa;  parity     :  1b" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;verticalAlign=top;arcSize=3;" vertex="1" parent="1">
+  <mxGeometry x="756" y="207" width="290" height="248" as="geometry"/>
+</mxCell>
+
+<!-- SRAM 1B: waySplit 1 (Way 2 & 3) -->
+<mxCell id="32" value="SRAM 1-B&#xa;waySplit 1  (Way 2 &amp; 3)&#xa;━━━━━━━━━━━━━━━━━━&#xa;128 rows × 2 ways × 69b&#xa;&#xa;entry = meta(68b) + parity(1b)&#xa;  phyTag     : 36b&#xa;  maybeRvcMap: 32b&#xa;  parity     :  1b" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;verticalAlign=top;arcSize=3;" vertex="1" parent="1">
+  <mxGeometry x="1076" y="207" width="290" height="248" as="geometry"/>
+</mxCell>
+
+<!-- ValidArray 1 -->
+<mxCell id="33" value="validArray[1]  —  RegInit  (128 × 4b = 512b, register not SRAM)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontStyle=1;align=left;spacingLeft=8;" vertex="1" parent="1">
+  <mxGeometry x="756" y="466" width="610" height="26" as="geometry"/>
+</mxCell>
+
+<!-- ══════════════════════════════════════════════════════════════
+     Read Routing
+     ══════════════════════════════════════════════════════════════ -->
+<mxCell id="40" value="Read Routing  (ICacheMetaArray.scala)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1;align=left;" vertex="1" parent="1">
+  <mxGeometry x="20" y="506" width="500" height="20" as="geometry"/>
+</mxCell>
+
+<!-- normal line -->
+<mxCell id="41" value="Single-line  (isDoubleLine=false):  fetch port 0 → SB(vSetIdx₀[0])   only 1 sub-bank accessed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1">
+  <mxGeometry x="20" y="528" width="1400" height="28" as="geometry"/>
+</mxCell>
+
+<!-- double line -->
+<mxCell id="42" value="Double-line   (isDoubleLine=true) :  fetch port 0 → SB(vSetIdx₀[0]),  fetch port 1 → SB(vSetIdx₁[0])   consecutive sets → always even+odd → SB0 ≠ SB1  ✓ no conflict" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1">
+  <mxGeometry x="20" y="560" width="1400" height="28" as="geometry"/>
+</mxCell>
+
+<!-- VecRotate note -->
+<mxCell id="43" value="VecRotate: if vSetIdx₀ is odd, rotate requests right-by-1 so SB0 always serves even set and SB1 always serves odd set  |  rotate back on response" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999;fontSize=11;fontStyle=2;align=left;spacingLeft=10;" vertex="1" parent="1">
+  <mxGeometry x="20" y="592" width="1400" height="24" as="geometry"/>
+</mxCell>
+
+<!-- ══════════════════════════════════════════════════════════════
+     Info / Legend
+     ══════════════════════════════════════════════════════════════ -->
+<mxCell id="50" value="nSets=256  |  nWays=4  |  NumInterleavedBank=2  |  NumInterleavedSet=128  |  MetaWaySplit=2  |  MetaDataSplit=1&#xa;MetaBits=68b (phyTag 36b + maybeRvcMap 32b)  |  MetaEcc=parity (+1b)  |  MetaEntryBits=69b  |  Total SRAMs: 4  |  Total SRAM bits: 4 × 128 × 2 × 69 = 70,656b" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666;fontColor=#333;fontSize=11;align=left;spacingLeft=10;verticalAlign=middle;" vertex="1" parent="1">
+  <mxGeometry x="20" y="626" width="1400" height="48" as="geometry"/>
+</mxCell>
+
+</root>
+</mxGraphModel>
+</diagram>
+</mxfile>
