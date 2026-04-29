@@ -689,7 +689,105 @@ Notes:
 
 ---
 
-## 7. MissUnit Analysis Link
+## 7. Victim Selection
+
+`ICacheReplacer` manages the replacement policy (default: PLRU) for all ICache ways. It exposes two interfaces: `touch` for recording cache hits, and `victim` for querying which way to evict on a miss.
+
+### 7.1 Victim Selection Timing
+
+Victim selection happens at **`acquireArb.io.out.fire`** — the cycle the TileLink A-channel acquire is issued to L2 — not at TileLink grant time when the data arrives.
+
+The reason is that the victim way must be decided and stored in the MSHR before the refill data arrives. When the last grant beat lands, MissUnit uses the pre-stored `mshrInfo.way` to drive the SRAM write waymask. Delaying the decision to grant time would cause two problems: the replacer state may have changed across multi-beat transfers, and multiple in-flight MSHRs each need their own independent victim way recorded.
+
+```mermaid
+sequenceDiagram
+    participant MP as ICacheMainPipe
+    participant MU as ICacheMissUnit
+    participant MSHR as ICacheMshr
+    participant Arb as acquireArb
+    participant Repl as ICacheReplacer
+    participant L2
+
+    MP->>MU: fetchReq.fire (blkPAddr, vSetIdx)
+    MU->>MSHR: allocate (valid=true, issue=false)
+
+    MSHR->>Arb: acquire.valid = true
+    Arb->>Arb: arbitrate among all MSHRs
+    Note over Arb,Repl: acquireArb.out.fire — victim is selected here
+    Arb->>L2: TileLink Acquire (source = mshrId)
+    Arb->>Repl: victim.req.valid = true, vSetIdx
+    Repl-->>Arb: victim.resp.way (combinational)
+    MSHR->>MSHR: latch victimWay into way register (acquire.fire)
+    Note over Repl: next cycle: touch victim way → LRU state updated
+
+    loop TileLink grant beats
+        L2-->>MU: Grant beat (data, source)
+        MU->>MU: accumulate into respDataReg
+    end
+
+    Note over MU: lastFireNext — all beats received
+    MU->>MU: RegEnable captures mshrInfo (including stored way)
+    MU->>MU: waymask = UIntToOH(mshrInfo.way)
+    MU->>MU: writeSramValid = respValid && !corrupt && !flush && !fencei
+    MU->>MU: write MetaArray / DataArray using pre-selected waymask
+```
+
+### 7.2 How Victim Is Selected
+
+#### Replacer structure
+
+`ICacheReplacer` instantiates `PortNumber (= 2)` independent replacer instances.
+
+```scala
+val replacers = Seq.fill(PortNumber)(ReplacementPolicy.fromString(Replacer, nWays, nSets / PortNumber))
+```
+
+Sets are split across the two instances by `vSetIdx(0)`:
+
+| Replacer index | Handles sets |
+| --- | --- |
+| `replacers(0)` | even-indexed sets (`vSetIdx(0) == 0`) |
+| `replacers(1)` | odd-indexed sets (`vSetIdx(0) == 1`) |
+
+Each instance manages `nSets / 2 = 128` sets with `nWays = 4` ways.
+
+#### Victim query (combinational)
+
+```scala
+io.victim.resp.way := Mux(
+  io.victim.req.bits.vSetIdx(0),
+  replacers(1).way(io.victim.req.bits.vSetIdx(idxBits - 1, 1)),
+  replacers(0).way(io.victim.req.bits.vSetIdx(idxBits - 1, 1))
+)
+```
+
+The response is purely combinational — the victim way is available in the same cycle as the request.
+
+#### LRU state update (next cycle)
+
+After returning a victim, the replacer touches that way one cycle later so that the LRU tree reflects the new occupant:
+
+```scala
+val victimVSetIdxReg = RegEnable(io.victim.req.bits.vSetIdx, ..., io.victim.req.valid)
+val victimWayReg     = RegEnable(io.victim.resp.way, ..., io.victim.req.valid)
+touchWays(i)(1).valid := RegNext(io.victim.req.valid) && (victimVSetIdxReg(0) === i.U)
+```
+
+The one-cycle delay is intentional: it guarantees that the next MSHR to query the same set (which can only fire at the earliest in the following cycle, because `acquireArb` serializes acquire fires) sees the already-updated LRU state and receives a different way.
+
+#### Collision prevention summary
+
+Two MSHRs can target the same set index with different block addresses. Victim collision is prevented by the combination of:
+
+| Mechanism | Effect |
+| --- | --- |
+| `acquireArb` serializes acquire fires | Only one victim request per cycle — no simultaneous queries to the same set |
+| Replacer touches victim in next cycle | By the time the second MSHR fires, the first victim way is already marked recently used |
+| MSHR lookup deduplication (`fetchHit`) | Same `blkPAddr + vSetIdx` never allocates a second MSHR, so the same block cannot claim two ways |
+
+---
+
+## 8. MissUnit Analysis Link
 
 Detailed MissUnit behavior is documented separately:
 
