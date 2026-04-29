@@ -251,8 +251,8 @@ When two bundles request the same cacheline (`bundle0.blkPAddr == bundle1.blkPAd
 #### S0 Advance Conditions
 
 ```text
-s0_canGo[0] = toData[0].ready && fromWayLookup.valid_count >= 1 && s1_ready[0]
-s0_canGo[1] = toData[1].ready && fromWayLookup.valid_count >= 2 && s1_ready[1]
+s0_canGo[0] = toData[0].ready && fromWayLookup.slot0.ready && s1_ready[0]
+s0_canGo[1] = toData[1].ready && fromWayLookup.slot0.ready && fromWayLookup.slot1.ready && s1_ready[1]
               && !duplicate && !subbank_conflict
 fromFtq[0].ready = s0_canGo[0]
 fromFtq[1].ready = s0_canGo[0] && s0_canGo[1]
@@ -292,7 +292,16 @@ when(s1_flush_1 && !s1_flush_0): { s1_valid[1] := false; s1_b1_resp_buf_valid :=
 
 ### 5.2 PrefetchPipe — 2-Wide + PTW Serialization (P1.6)
 
-The PrefetchPipe is extended to fully 2-wide. iTLB and PMP are CAM-based, so the hit path scales to 2× by simply doubling comparator circuits — no structural change. On TLB miss, the PTW outbound channel remains 1-wide.
+The PrefetchPipe is extended to fully 2-wide. iTLB and PMP are CAM-based, so the hit path scales to 2× by simply doubling comparator circuits — no structural change. On TLB miss, the PTW outbound channel remains 1-wide, but a TLB miss in slot 0 must not block a TLB hit in slot 1 from completing its tag lookup and WayLookup enqueue.
+
+Policy:
+
+- Each slot has independent TLB-miss progress and independent WayLookup completion.
+- Slot 1 may enqueue before slot 0 when slot 0 is waiting for PTW and slot 1 is TLB-hit/cache-classified.
+- WayLookup must therefore provide an **ordered consumer view** to MainPipe rather than assuming physical FIFO enqueue order equals FTQ order.
+- MainPipe may consume slot 1 only when the older slot 0 entry is also available or known to be an exception/redirect case.
+
+This preserves 2-wide prefetch throughput during slot 0 TLB misses while keeping the external fetch response ordered.
 
 #### PTW Pending Buffer
 
@@ -316,31 +325,70 @@ when(io.ptw_resp.valid):
   when(resp.vpn === slot1_pending_vpn): slot1_tlb_update := true
 ```
 
-WayLookup enqueue order: slot 1 only after slot 0 completes, maintaining FIFO ordering.
+WayLookup enqueue policy: slot 1 can enqueue before slot 0. Ordering is restored by storing slot identity and FTQ order metadata in WayLookup and presenting ordered entries to MainPipe.
 
 | Slot 0 TLB | Slot 1 TLB | WayLookup enqueue |
 | --- | --- | --- |
 | hit | hit | simultaneous |
-| hit | miss | S0 immediately; S1 after PTW |
-| miss | hit | S1 waits; enqueue S0→S1 after S0 PTW |
-| miss | miss (diff VPN) | S0 PTW first, S1 queued; enqueue in order |
-| miss | miss (same VPN) | 1 PTW req; both update on response |
+| hit | miss | slot 0 immediately; slot 1 after PTW |
+| miss | hit | slot 1 enqueues early; slot 0 enqueues after PTW |
+| miss | miss (diff VPN) | each slot enqueues when its PTW resolves; PTW issue remains 1-wide |
+| miss | miss (same VPN) | 1 PTW req; both update on response and can enqueue together |
+
+Required WayLookup metadata for early slot 1 enqueue:
+
+```text
+WayLookupEntry:
+  ftqIdx
+  fetchSlot        // 0 or 1 within the 2-fetch group
+  groupSeq         // monotonically increasing 2-fetch group id, or equivalent order tag
+  ready
+  exception
+  pTag / waymask / meta
+```
+
+MainPipe ordered read rule:
+
+```text
+oldest0 = entry(groupSeq = readGroup, fetchSlot = 0)
+oldest1 = entry(groupSeq = readGroup, fetchSlot = 1)
+
+read[0].valid := oldest0.ready
+read[1].valid := oldest0.ready && oldest1.ready
+```
+
+If slot 1 is ready before slot 0, it remains stored in WayLookup but is not exposed to MainPipe as `read[1]` until slot 0 becomes ready or slot 0 triggers a redirect/exception path.
 
 ---
 
-### 5.3 WayLookup — Dual-Port Correctness (P1.2)
+### 5.3 WayLookup — Dual-Port Correctness and Ordered View (P1.2)
 
 #### Structure
 
 ```text
 entries:     RegInit(VecInit.fill(WayLookupSize=64)(...))
-readPtr:     advances up to 2/cycle
-writePtr:    advances up to 2/cycle
-valid_count  = (writePtr - readPtr) mod 64
+write side:  accepts up to 2 completed PrefetchPipe slots/cycle
+read side:   exposes up to 2 ordered MainPipe entries/cycle
 
-io.read[0].valid = (valid_count >= 1) && !updateStall[readPtr]
-io.read[1].valid = (valid_count >= 2) && !updateStall[readPtr+1]
+entry key = (groupSeq, fetchSlot)
 ```
+
+Because PrefetchPipe allows slot 1 to enqueue before slot 0, WayLookup cannot rely on raw FIFO insertion order alone. It must track readiness per ordered slot and present MainPipe with the oldest group in order.
+
+```text
+group[readGroup].slot[0].ready
+group[readGroup].slot[1].ready
+
+io.read[0].valid := slot0.ready && !updateStall(slot0)
+io.read[1].valid := slot0.ready && slot1.ready && !updateStall(slot1)
+```
+
+Physical implementation can still use a circular buffer, but the buffer must either:
+
+- reserve two entries per accepted 2-fetch group and allow out-of-order fill of slot 0/1, or
+- use associative lookup by `(groupSeq, fetchSlot)` for the head group.
+
+The first option is preferred for timing.
 
 #### Exception Entry — Per-Slot
 
@@ -364,13 +412,13 @@ writePtr := flushTargetPtr
 // flush targets slot 1 ftqIdx only → keep slot 0, rollback slot 1
 ```
 
-#### updateStall — Simultaneous 2-Entry Check
+#### updateStall — Simultaneous 2-Slot Check
 
 ```text
-val updateStall_0 = entryUpdate(readPtr)
-val updateStall_1 = entryUpdate(readPtr + 1)
-io.read[0].valid := (valid_count >= 1) && !updateStall_0
-io.read[1].valid := (valid_count >= 2) && !updateStall_1
+val updateStall_0 = entryUpdate(headGroup.slot0)
+val updateStall_1 = entryUpdate(headGroup.slot1)
+io.read[0].valid := headGroup.slot0.ready && !updateStall_0
+io.read[1].valid := headGroup.slot0.ready && headGroup.slot1.ready && !updateStall_1
 // if only B1 has updateStall, B0 can still proceed
 ```
 
