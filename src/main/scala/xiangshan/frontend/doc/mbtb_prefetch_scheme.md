@@ -1,134 +1,134 @@
 # mBTB + TAGE Pre-fetch Buffer Scheme for Frontend IPC Enhancement
 
-## 1. 배경 및 문제
+## 1. Background and Problem
 
-### 현재 예측 구조
+### Current Prediction Structure
 
-XiangShan frontend BPU는 fast path와 slow/high-accuracy path가 pipeline stage별로 결합된 구조이다.
+The XiangShan frontend BPU combines fast and slow/high-accuracy paths across pipeline stages.
 
-| Stage | 주요 구성 | 역할 |
-|-------|-----------|------|
-| S1 | uBTB + ABTB + uTAGE + uRAS | 빠른 next fetch PC 생성 |
-| S2 | mBTB + TAGE + SC | 더 큰 BTB와 history 기반 direction 보정 |
-| S3 | latched mBTB/TAGE/SC + ITTAGE + RAS | indirect/return target 보정 및 최종 prediction 조립 |
+| Stage | Key Components | Role |
+| --- | --- | --- |
+| S1 | uBTB + ABTB + uTAGE + uRAS | Fast next fetch PC generation |
+| S2 | mBTB + TAGE + SC | Larger BTB and history-based direction correction |
+| S3 | latched mBTB/TAGE/SC + ITTAGE + RAS | Indirect/return target correction and final prediction assembly |
 
-현재 S1 prediction은 FTQ로 먼저 전달되고, S3 final prediction이 S1 prediction과 다르면 `s3_override`가 발생한다.
+The S1 prediction is forwarded to the FTQ first. If the S3 final prediction differs from the S1 prediction, `s3_override` is triggered.
 
-### Override 문제
+### The Override Problem
 
-- S1 결과와 S3 결과가 다를 경우 `s3_override`가 발생한다.
-- override가 발생하면 BPU 내부 S1/S2 in-flight prediction이 flush되고, FTQ/IFU/prefetch pointer가 필요 시 rollback된다.
-- 반복적인 override는 frontend bandwidth 저하와 pipeline bubble 증가로 이어질 수 있다.
+- When S1 and S3 results differ, `s3_override` fires.
+- On override, in-flight S1/S2 predictions inside the BPU are flushed, and FTQ/IFU/prefetch pointers are rolled back as needed.
+- Frequent overrides degrade frontend bandwidth and increase pipeline bubbles.
 
-이 문서의 목표는 S3 final prediction 전체를 앞당기는 것이 아니라, **mBTB + TAGE 수준의 prediction을 미리 준비해서 S1 prediction 품질을 높이고 S3 override 발생률을 낮추는 것**이다.
+The goal of this document is **not** to move the entire S3 final prediction earlier, but to **pre-prepare mBTB + TAGE level predictions to improve S1 prediction quality and reduce s3_override frequency**.
 
 ---
 
-## 2. 제안 아이디어: mBTB + TAGE Pre-fetch Buffer Scheme
+## 2. Proposed Idea: mBTB + TAGE Pre-fetch Buffer Scheme
 
-### 핵심 아이디어
+### Core Idea
 
-uBTB entry에 현재 fetch block 기준 **3-block ahead PC**와 TAGE folded-history delta를 추가로 저장한다.
-S1에서 uBTB entry를 읽을 때 이 metadata를 이용해 `PC_{X+3}`에 대한 mBTB + TAGE prefetch를 opportunistic하게 발행하고, 결과를 32-entry CAM buffer에 저장한다.
+Each uBTB entry stores an additional **3-block ahead PC** (relative to the current fetch block) and a TAGE folded-history delta.
+When the uBTB entry is read at S1, this metadata is used to opportunistically issue an mBTB + TAGE prefetch for `PC_{X+3}`, and the result is stored in a 32-entry CAM buffer.
 
-3 fetch block 뒤 실제 fetch가 `PC_{X+3}`에 도달했을 때 buffer가 hit하면, 기존 S1 prediction 대신 precomputed mBTB + TAGE result를 사용한다.
+When the regular fetch reaches `PC_{X+3}` three fetch blocks later and the buffer hits, the precomputed mBTB + TAGE result replaces the original S1 prediction.
 
-**4-ahead 대비 3-ahead를 선택한 이유**: PC_X → PC_{X+3} 사이 intermediate branch 수가 하나 줄어들어 historyDelta 정확도가 높아지고, speculative folded history 오류 가능성이 감소한다.
+**Why 3-ahead over 4-ahead**: The number of intermediate branches between PC_X and PC_{X+3} is reduced by one, improving historyDelta accuracy and lowering the chance of speculative folded history errors.
 
-중요한 제한:
+Key constraints:
 
-- prefetch 대상은 **mBTB + TAGE까지만**이다.
-- SC, ITTAGE, RAS는 prefetch path에서 제외한다.
-- S3 override는 항상 기존처럼 허용한다.
-- 따라서 이 scheme은 correctness를 위해 S3 final path를 억제하지 않는다.
-- 기대 효과는 S1 prediction이 더 정확해져서 S3 override가 자연스럽게 줄어드는 것이다.
+- Prefetch targets **mBTB + TAGE only**.
+- SC, ITTAGE, and RAS are excluded from the prefetch path.
+- S3 override is always permitted, as before.
+- This scheme does not suppress the S3 final path for correctness.
+- The expected benefit is that more accurate S1 predictions naturally reduce S3 override frequency.
 
-### 타이밍 분석
+### Timing Analysis
 
 ```
 Cycle N:   PC_X → S0
 
 Cycle N+1: PC_X → S1
-           uBTB hit → aheadPc = PC_{X+3}, foldedHistoryDelta 획득
-           speculative folded history 생성
+           uBTB hit → aheadPc = PC_{X+3}, foldedHistoryDelta acquired
+           speculative folded history generated
 
 Cycle N+2: PC_{X+1} → S0 (regular)
            PC_{X+3} prefetch request → mBTB S0 (sideband)
-           mBTB S0 타이밍에 맞춰 발행: regular read 우선, conflict 시 drop
+           Issued at mBTB S0 timing: regular read has priority, dropped on conflict
 
 Cycle N+3: PC_{X+2} → S1 (regular)
-           PC_{X+3} prefetch → mBTB S1 (wait)
+           PC_{X+3} prefetch → mBTB S1 (in-flight)
 
-Cycle N+4: PC_{X+3} → S1 (regular fetch 도달)
-           PC_{X+3} prefetch → mBTB S2 (result 완료) → buffer write
+Cycle N+4: PC_{X+3} → S1 (regular fetch arrives)
+           PC_{X+3} prefetch → mBTB S2 (result ready) → buffer write
            ─────────────────────────────────────────────────
-           buffer write와 buffer read(CAM lookup)가 같은 사이클 발생
-           → same-cycle write-read bypass 필수
+           buffer write and buffer read (CAM lookup) occur in the same cycle
+           → same-cycle write-read bypass is required
            ─────────────────────────────────────────────────
-           CAM HIT  → S1 prediction을 buffer result로 대체
-           CAM MISS → 기존 uBTB/ABTB/uTAGE path 사용
+           CAM HIT  → replace S1 prediction with buffer result
+           CAM MISS → use original uBTB/ABTB/uTAGE path
 ```
 
-**Bypass 설계**: write key = `{PC_{X+3}, historySignature}`, read key = `{s1_startPc, expectedSignature}`.
-같은 cycle에 write/read key가 동일하면 CAM array에 기록 완료 전이라도 write data를 read result로 forward한다.
-TAGE prefetch도 동일 타이밍(mBTB S0 사이드밴드 발행, S2 결과)으로 맞춰야 한다.
+**Bypass design**: write key = `{PC_{X+3}, historySignature}`, read key = `{s1_startPc, expectedSignature}`.
+If write and read keys match in the same cycle, write data is forwarded as the read result before the CAM array commit completes.
+The TAGE prefetch must be aligned to the same timing (mBTB S0 sideband issue, S2 result ready).
 
-**3-ahead 타이밍 특성**: prefetch 완료(cycle N+4)와 fetch의 S1 도달(cycle N+4)이 같은 사이클이므로 bypass는 필수이며 대안이 없다. S0 lookup / S1 use 구조는 S0 of PC_{X+3}이 cycle N+3이지만 prefetch 완료가 N+4이므로 3-ahead에서는 불가능하다 — 이 구조는 4-ahead(완료 N+4, S0 lookup N+4, S1 use N+5)로 전환해야만 bypass 부담을 S0 레벨로 옮길 수 있다. 3-ahead를 선택하는 한 S1 bypass는 설계 요구사항이다. 이 대신 4-ahead 대비 historyDelta 경로가 한 block 짧아져 speculative history 정확도가 향상된다는 이점이 있다.
+**3-ahead timing characteristic**: Prefetch completion (cycle N+4) and fetch S1 arrival (cycle N+4) occur in the same cycle, making bypass mandatory with no alternative. The S0 lookup / S1 use structure is impossible for 3-ahead because S0 of PC_{X+3} is cycle N+3 while prefetch completes at N+4 — this structure is only feasible by switching to 4-ahead (completion N+4, S0 lookup N+4, S1 use N+5), which moves the bypass burden to the S0 level. As long as 3-ahead is chosen, S1 bypass is a design requirement. The compensating advantage over 4-ahead is that the historyDelta path is one block shorter, improving speculative history accuracy.
 
-### 구성 요소
+### Components
 
 #### (1) Pre-fetch Buffer
 
-- 구조: 32-entry fully-associative CAM
+- Structure: 32-entry fully-associative CAM
 - Hit key: `{pcTag, historySignature}`
-  - `pcTag`: prefetch 대상 `PC_{X+3}`
-  - `historySignature` 매칭 방식:
-    - **write key**: prefetch 발행 시(cycle N+2) `phr.io.prefetchHistorySignature` = `hash(s0_foldedPhr XOR foldedHistoryDelta)`를 N+4까지 파이프라인
-    - **read key**: S1 of PC_{X+3}(cycle N+4) 시점의 `hash(s1_foldedPhr)` — 실제 PHR 상태
-    - 알고리즘 핵심: speculation이 맞으면 두 값 일치 → hit. redirect 등으로 실제 history가 달라지면 불일치 → miss → 기존 uBTB path fallback
+  - `pcTag`: the prefetch target `PC_{X+3}`
+  - `historySignature` matching:
+    - **write key**: `phr.io.prefetchHistorySignature` = `hash(s0_foldedPhr XOR foldedHistoryDelta)` computed at prefetch issue (cycle N+2), pipelined to N+4
+    - **read key**: `hash(s1_foldedPhr)` — actual PHR state at S1 of PC_{X+3} (cycle N+4)
+    - Algorithm core: if speculation is correct, both values match → hit. If actual history diverges due to redirect or misprediction, mismatch → miss → fallback to original uBTB path
 - Data:
   - `taken`
   - `target`
   - `cfiPosition`
   - `attribute`
-- Replacement: PLRU 또는 round-robin
-- Read timing: S1 prediction selection과 같은 cycle
-- Write timing: mBTB + TAGE prefetch pipeline 완료 cycle
-- Same-cycle write-read bypass 지원
-- Redirect 시 flush 불필요: historySignature 불일치로 자동 miss 처리됨. S3 override가 correctness 보장.
+- Replacement: PLRU or round-robin
+- Read timing: same cycle as S1 prediction selection
+- Write timing: cycle when mBTB + TAGE prefetch pipeline completes
+- Same-cycle write-read bypass supported
+- No flush needed on redirect: historySignature mismatch causes automatic miss. S3 override guarantees correctness.
 
-#### (2) uBTB Entry 확장
+#### (2) uBTB Entry Extension
 
-기존 uBTB entry는 현재 fetch block의 branch position/attribute/target 중심 정보를 저장한다.
-이 scheme에서는 uBTB가 mBTB에는 없는 **successor/path metadata**를 추가로 가진다.
+The existing uBTB entry stores branch position/attribute/target information for the current fetch block.
+In this scheme, the uBTB also carries **successor/path metadata** not present in the mBTB.
 
-추가 필드:
+Added fields:
 
 ```scala
 val aheadValid: Bool
 val aheadPc:    PrunedAddr // full/pruned fetch-block PC
-val foldedHistoryDelta: Vec[...] // TAGE folded history 보정용 delta
-val historySignature: UInt       // buffer hit guard용 짧은 signature
+val foldedHistoryDelta: Vec[...] // precomputed delta for TAGE folded history correction
+val historySignature: UInt       // short signature for prefetch issue validity filtering
 ```
 
-`aheadPc`는 partial target encoding이 아니라 full/pruned PC로 저장한다. mBTB/TAGE prefetch request와 CAM tag compare에 직접 사용하기 위해서이다.
+`aheadPc` is stored as a full/pruned PC, not a partial target encoding, for direct use in mBTB/TAGE prefetch requests and CAM tag comparison.
 
 #### (3) Folded History Delta
 
-TAGE는 `hash(PC, folded history)` 기반으로 table index/tag를 만든다.
-따라서 `PC_{X+3}`를 미리 예측하려면 `PC_{X+3}` 시점의 folded history가 필요하다.
+TAGE builds table indices and tags from `hash(PC, folded history)`.
+Predicting `PC_{X+3}` in advance therefore requires the folded history at the `PC_{X+3}` point.
 
-단순 taken/NT bit만 저장하는 방식은 충분하지 않다. 현재 PHR update는 branch target과 CFI PC를 포함하는 path hash 영향을 받기 때문이다.
+Storing only taken/NT bits is insufficient, because the PHR update is influenced by a path hash that includes branch target and CFI PC.
 
-따라서 이 scheme의 `foldedHistoryDelta`는 다음 의미를 가진다:
+`foldedHistoryDelta` in this scheme represents:
 
-- `PC_X -> PC_{X+3}` 사이 committed path의 branch들이 TAGE folded history에 미치는 영향을 precomputed delta로 저장
-- runtime에는 현재 `s0_foldedPhr`에 이 delta를 적용해 `PC_{X+3}`용 speculative folded history를 생성
-- raw GHR 전체를 복원하지 않고, TAGE table별 folded history를 보정하는 방식
+- A precomputed delta capturing the effect of branches along the committed path from `PC_X` to `PC_{X+3}` on the TAGE folded history
+- At runtime, this delta is applied to the current `s0_foldedPhr` to produce a speculative folded history for `PC_{X+3}`
+- Rather than reconstructing the full GHR, this corrects only the per-table folded histories used by TAGE
 
 **Packed UInt Encoding**:
 
-TAGE 테이블 수를 N, 테이블 i의 folded history width를 `fh_w_i`라 하면:
+Let N be the number of TAGE tables and `fh_w_i` be the folded history width for table i:
 
 ```
 FoldedHistoryDeltaWidth = sum(fh_w_i for i in 0..N-1)
@@ -136,78 +136,78 @@ FoldedHistoryDeltaWidth = sum(fh_w_i for i in 0..N-1)
 foldedHistoryDelta = [ delta_{N-1} | ... | delta_1 | delta_0 ]   // LSB = table 0
 ```
 
-각 `delta_i`는 commit-time에 계산한 XOR mask이다:
+Each `delta_i` is an XOR mask computed at commit time:
 
 ```
 delta_i = foldedHistory_at_X[i] XOR foldedHistory_at_{X+3}[i]
 ```
 
-runtime apply:
+Runtime apply:
 
 ```
 prefetchFoldedPhr[i] = s0_foldedPhr[i] XOR delta_i
 ```
 
-folded history update가 XOR 기반이므로, delta 자체도 XOR mask로 표현된다.
-테이블별 slice 범위는 `AllFoldedHistoryInfo`에서 정적으로 결정된다.
+Since folded history updates are XOR-based, the delta itself is represented as an XOR mask.
+Per-table slice ranges are determined statically from `AllFoldedHistoryInfo`.
 
-`historySignature`는 이 speculative folded history에서 만든 짧은 hash/signature이다. buffer hit 조건에 포함해 stale/wrong-path prefetch 사용을 줄인다.
+`historySignature` is a short hash/signature derived from this speculative folded history. It is included in the buffer hit condition to reduce use of stale or wrong-path prefetch results.
 
 #### (4) Commit-based 3-ahead Training
 
-`aheadPc`와 `foldedHistoryDelta`는 commit된 path 기준으로 학습한다.
+`aheadPc` and `foldedHistoryDelta` are trained based on the committed path.
 
-이유:
+Rationale:
 
-- 이 metadata는 mBTB가 원래 갖고 있는 branch entry가 아니다.
-- uBTB entry에 “현재 block에서 3 fetch-block 뒤로 이어지는 committed successor path”를 저장하는 것이다.
-- wrong-path resolve 결과로 학습하면 uBTB에 잘못된 3-ahead path를 심을 수 있다.
+- This metadata is not a branch entry natively held by the mBTB.
+- It stores the "committed successor path 3 fetch-blocks ahead" from the current block in each uBTB entry.
+- Training from wrong-path resolve results would plant incorrect 3-ahead paths in the uBTB.
 
-학습 시 필요한 정보:
+Information required for training:
 
 - `startPc = PC_X`
 - `aheadPc = PC_{X+3}`
 - `foldedHistoryDelta`
 - `historySignature`
 
-FTQ commit side에서 `commitPtr ~ commitPtr+3` window를 추적하고, 해당 window가 모두 committed 되었을 때 uBTB 3-ahead metadata를 갱신한다.
+The FTQ commit side tracks the `commitPtr ~ commitPtr+3` window and updates the uBTB 3-ahead metadata when all 4 fetch blocks in the window have committed.
 
-### 동작 흐름 요약
+### Operational Flow Summary
 
 ```
 [Prefetch Issue]
 S1 uBTB hit for PC_X
-  ├─ aheadValid 확인
+  ├─ check aheadValid
   ├─ aheadPc = PC_{X+3}
-  ├─ foldedHistoryDelta로 speculative folded history 생성
-  └─ mBTB + TAGE prefetch read 시도
-       ├─ bank conflict 없음 → issue
-       └─ bank conflict 있음 → drop
+  ├─ generate speculative folded history from foldedHistoryDelta
+  └─ attempt mBTB + TAGE prefetch read
+       ├─ no bank conflict → issue
+       └─ bank conflict   → drop
 
 [Buffer Fill]
-mBTB + TAGE prefetch result 완료
-  ├─ indirect/return이면 buffer write 제외
-  ├─ taken=true  → branch prediction 저장
-  └─ taken=false → fallThrough-style prediction 저장
+mBTB + TAGE prefetch result ready
+  ├─ if indirect/return → skip buffer write
+  ├─ taken=true  → store branch prediction
+  └─ taken=false → store as fallThrough-style prediction
 
 [Buffer Use]
 S1 fetch PC_{X+3}
   ├─ CAM lookup key = {PC_{X+3}, expectedHistorySignature}
-  ├─ HIT  → S1 prediction을 buffer result로 대체
-  └─ MISS → 기존 uBTB/ABTB/uTAGE result 사용
+  ├─ HIT  → replace S1 prediction with buffer result
+  └─ MISS → use original uBTB/ABTB/uTAGE result
 
 [S3 Check]
-기존 S3 final path는 항상 유지
-  ├─ SC flip 가능
-  ├─ ITTAGE/RAS target correction 가능
-  └─ S3 prediction != S1 prediction이면 기존처럼 s3_override 발생
+S3 final path is always preserved
+  ├─ SC can flip direction
+  ├─ ITTAGE/RAS can correct target
+  └─ if S3 prediction != S1 prediction → s3_override fires as usual
 ```
 
-### Prediction 사용 정책
+### Prediction Usage Policy
 
 #### Buffer Hit Priority
 
-buffer hit 시 prefetch result가 기존 S1 result보다 우선한다.
+On a buffer hit, the prefetch result takes priority over the original S1 result.
 
 ```scala
 when(prefetchBufferHit) {
@@ -217,61 +217,61 @@ when(prefetchBufferHit) {
 }
 ```
 
-단, `s3_override`는 절대 suppress하지 않는다.
+`s3_override` is never suppressed.
 
-#### Indirect / Return 처리
+#### Indirect / Return Handling
 
-prefetch result는 conditional/direct branch에만 사용한다.
+Prefetch results are used only for conditional and direct branches.
 
-- conditional: mBTB candidate + TAGE direction 반영
-- direct: mBTB target 사용
-- indirect: 사용하지 않음
-- return: 사용하지 않음
+- conditional: apply mBTB candidate + TAGE direction
+- direct: use mBTB target as taken
+- indirect: not used
+- return: not used
 
-indirect/return은 ITTAGE/RAS 의존성이 크므로 S3 final path에 맡긴다.
+Indirect and return branches depend heavily on ITTAGE/RAS and are delegated to the S3 final path.
 
-#### Not-taken 처리
+#### Not-taken Handling
 
-`taken=false` result도 buffer에 저장하고 사용한다.
+`taken=false` results are stored in the buffer and used.
 
-단, not-taken result는 branch identity를 유지하지 않고 fallThrough-style prediction으로 저장한다.
+However, not-taken results are stored as fallThrough-style predictions without preserving branch identity:
 
 - `taken = false`
 - `attribute = None`
 - `cfiPosition = fallThrough.cfiPosition`
 - `target = fallThrough.target`
 
-이 방식은 기존 `Prediction ===` 비교와 잘 맞고, uBTB/ABTB가 taken으로 예측했지만 mBTB+TAGE가 not-taken으로 판단하는 케이스를 앞당길 수 있다.
+This aligns well with the existing `Prediction ===` comparison and allows the scheme to advance cases where uBTB/ABTB predicts taken but mBTB+TAGE determines not-taken.
 
-### 기대 효과
+### Expected Benefits
 
-- mBTB/TAGE 기반 taken/not-taken mismatch를 S1에서 일부 제거
-- mBTB가 더 정확히 찾은 earlier cfiPosition을 S1에서 먼저 사용 가능
-- direct branch target mismatch 일부 감소
-- S3 override 빈도 감소 기대
+- Partially eliminates mBTB/TAGE-level taken/not-taken mismatches at S1
+- Allows earlier use of the more accurate cfiPosition found by mBTB at S1
+- Reduces some direct branch target mismatches
+- Expected reduction in S3 override frequency
 
-### 남는 override
+### Remaining Overrides
 
-다음 케이스는 여전히 S3 override가 발생할 수 있다.
+S3 override can still occur in the following cases:
 
-- SC가 TAGE direction을 flip하는 경우
-- ITTAGE가 indirect target을 보정하는 경우
-- RAS가 return target을 보정하는 경우
-- buffer result가 stale이거나 historySignature는 통과했지만 실제 S3 result와 다른 경우
-- prefetch가 bank conflict로 drop되어 buffer miss가 난 경우
+- SC flips the TAGE direction
+- ITTAGE corrects an indirect target
+- RAS corrects a return target
+- Buffer result is stale or historySignature passed but actual S3 result differs
+- Prefetch was dropped due to bank conflict, resulting in a buffer miss
 
-### 리스크
+### Risks
 
-- S1 critical path에 32-entry CAM compare와 prediction mux가 추가된다.
-- uBTB entry width가 증가한다.
-- mBTB/TAGE banking 확장이 area와 timing에 영향을 줄 수 있다.
-- prefetch는 conflict 시 drop하므로 coverage가 bank conflict rate에 민감하다.
-- foldedHistoryDelta 생성과 commit window tracking이 FTQ commit side 복잡도를 높인다.
-- **indirect/return 제외로 인한 효과 제한**: s3_override 중 ITTAGE/RAS correction이 차지하는 비율이 높은 workload (예: C++ virtual dispatch, recursive call 중심 코드)에서는 이 scheme의 실효 override 감소폭이 미미할 수 있다. 구현 전 workload별 override 원인 분포를 simulation으로 먼저 측정해야 scheme 투자 대비 효과를 예측할 수 있다.
+- The S1 critical path gains a 32-entry CAM compare and a prediction mux.
+- uBTB entry width increases significantly.
+- mBTB/TAGE banking expansion may impact area and timing.
+- Coverage is sensitive to bank conflict rate, since dropped prefetches are not retried.
+- foldedHistoryDelta generation and commit window tracking increase FTQ commit-side complexity.
+- **Limited effectiveness due to indirect/return exclusion**: In workloads where ITTAGE/RAS corrections account for a large share of s3_overrides (e.g., C++ virtual dispatch, recursion-heavy code), the effective override reduction from this scheme may be negligible. The distribution of override causes by type should be measured via simulation before committing to implementation.
 
 ---
 
-## 3. 관련 논문 비교
+## 3. Related Work Comparison
 
 ### 3.1 LLBP — MICRO 2024
 
@@ -281,68 +281,68 @@ David Schall, Andreas Sandberg, Boris Grot (University of Edinburgh)
 - [ACM DL](https://dl.acm.org/doi/10.1109/MICRO61859.2024.00042)
 - [GitHub](https://github.com/dhschall/LLBP)
 
-#### 논문 방식
+#### LLBP Approach
 
-- TAGE predictor를 fast predictor로 두고, 대용량 LLBP storage를 backing store로 운용
-- Branch program context를 기준으로 prediction pattern을 LLBP에 저장
-- 4 unconditional branches ahead를 lookahead distance로 삼아 LLBP 결과를 미리 prefetch
-- 소형 in-core PatternBuffer에 저장 후 TAGE와 병렬 접근
-- PatternBuffer hit 시 LLBP 결과 사용, miss 시 TAGE 결과만 사용
+- Uses TAGE as a fast predictor with a large LLBP storage as a backing store
+- Stores prediction patterns in LLBP indexed by branch program context
+- Prefetches LLBP results using a lookahead of 4 unconditional branches ahead
+- Stores results in a small in-core PatternBuffer, accessed in parallel with TAGE
+- On PatternBuffer hit, uses LLBP result; on miss, uses TAGE result only
 
-#### 유사점
+#### Similarities — LLBP
 
-| 항목 | LLBP | 제안 scheme |
-|------|------|-------------|
-| 계층 구조 | TAGE fast + LLBP slow | S1 fast path + mBTB/TAGE prefetch |
-| Prefetch 방식 | N branches ahead | 4 fetch blocks ahead |
-| Buffer 위치 | PatternBuffer | mBTB/TAGE prefetch buffer |
-| Hit guard | context 기반 | PC tag + historySignature |
-| 목적 | slow predictor latency hiding | mBTB/TAGE result를 S1까지 당김 |
+| Item | LLBP | Proposed Scheme |
+| --- | --- | --- |
+| Hierarchy | TAGE fast + LLBP slow | S1 fast path + mBTB/TAGE prefetch |
+| Prefetch approach | N branches ahead | 3 fetch blocks ahead |
+| Buffer location | PatternBuffer | mBTB/TAGE prefetch buffer |
+| Hit guard | context-based | PC tag + historySignature |
+| Goal | hide slow predictor latency | pull mBTB/TAGE result forward to S1 |
 
-#### 차이점
+#### Differences — LLBP
 
-| 항목 | LLBP | 제안 scheme |
-|------|------|-------------|
-| 목적 | Prediction accuracy 향상 | S3 override 빈도 감소 |
-| Prefetch 단위 | branch/context pattern | fetch block PC |
-| Backing store | 별도 LLBP | 기존 mBTB/TAGE |
-| 구현 정책 | dedicated backing store access | conflict-free opportunistic access |
-| Final override | TAGE와 병렬 사용 | S3 final path는 항상 유지 |
+| Item | LLBP | Proposed Scheme |
+| --- | --- | --- |
+| Goal | Improve prediction accuracy | Reduce S3 override frequency |
+| Prefetch granularity | branch/context pattern | fetch block PC |
+| Backing store | dedicated LLBP | existing mBTB/TAGE |
+| Access policy | dedicated backing store access | conflict-free opportunistic access |
+| Final override | used in parallel with TAGE | S3 final path always preserved |
 
 ---
 
 ### 3.2 Two Level Bulk Preload — HPCA 2013
 
 **"Two Level Bulk Preload Branch Prediction"**  
-Bonanno, Collura 외 (IBM, zEnterprise EC12)
+Bonanno, Collura et al. (IBM, zEnterprise EC12)
 
 - [HPCA 2013 PDF](https://class.ece.iastate.edu/tyagi/cpre581/papers/HPCA13BulkPreloadBranch.pdf)
 - [IEEE Xplore](https://ieeexplore.ieee.org/document/6522308/)
 
-#### 논문 방식
+#### HPCA 2013 Approach
 
-- BTB1 + BTB2 2-level 구조
-- BTB1 miss 감지 시 BTB2에서 bulk preload
-- BTB2 접근을 제한해 power 효율 개선
-- hit 가능성이 높은 entry를 preload buffer에 준비
+- Two-level BTB1 + BTB2 structure
+- On BTB1 miss, bulk preloads from BTB2
+- Limits BTB2 accesses to improve power efficiency
+- Pre-populates a preload buffer with high-probability-hit entries
 
-#### 유사점
+#### Similarities — HPCA 2013
 
-| 항목 | HPCA 2013 | 제안 scheme |
-|------|-----------|-------------|
-| 계층 구조 | BTB1 + BTB2 | S1 BTB + mBTB |
-| 중간 buffer | BTB preload buffer | mBTB/TAGE prefetch buffer |
-| 목적 | redirect latency 감소 | S3 override 감소 |
-| 접근 정책 | lower-level BTB preload | mBTB/TAGE opportunistic prefetch |
+| Item | HPCA 2013 | Proposed Scheme |
+| --- | --- | --- |
+| Hierarchy | BTB1 + BTB2 | S1 BTB + mBTB |
+| Intermediate buffer | BTB preload buffer | mBTB/TAGE prefetch buffer |
+| Goal | reduce redirect latency | reduce S3 override |
+| Access policy | lower-level BTB preload | mBTB/TAGE opportunistic prefetch |
 
-#### 차이점
+#### Differences — HPCA 2013
 
-| 항목 | HPCA 2013 | 제안 scheme |
-|------|-----------|-------------|
-| Prefetch trigger | BTB1 miss 기반 reactive | uBTB threeAhead 기반 proactive |
-| Prefetch 대상 | BTB entry | mBTB + TAGE prediction result |
-| History 처리 | BTB 중심 | folded history delta 필요 |
-| Conflict policy | 논문 구조 의존 | regular read 우선, conflict 시 drop |
+| Item | HPCA 2013 | Proposed Scheme |
+| --- | --- | --- |
+| Prefetch trigger | reactive on BTB1 miss | proactive via uBTB threeAhead |
+| Prefetch target | BTB entry | mBTB + TAGE prediction result |
+| History handling | BTB-centric | requires folded history delta |
+| Conflict policy | depends on paper structure | regular read priority, drop on conflict |
 
 ---
 
@@ -352,57 +352,57 @@ Bonanno, Collura 외 (IBM, zEnterprise EC12)
 
 - [KCI Journal](https://journal.kci.go.kr/jksci/archive/articleView?artiId=ART001388533)
 
-#### 유사점
+#### Similarities — KCI 2009
 
-| 항목 | KCI 2009 | 제안 scheme |
-|------|----------|-------------|
-| 핵심 방향 | fetch 이전에 prediction 준비 | mBTB/TAGE 결과를 fetch 이전에 준비 |
-| BTB 변경 | Modified BTB | uBTB threeAhead metadata |
-| 목적 | prediction latency hiding | slow-path result를 S1에서 사용 |
+| Item | KCI 2009 | Proposed Scheme |
+| --- | --- | --- |
+| Core direction | prepare prediction before fetch | prepare mBTB/TAGE result before fetch |
+| BTB modification | Modified BTB | uBTB threeAhead metadata |
+| Goal | prediction latency hiding | use slow-path result at S1 |
 
-#### 차이점
+#### Differences — KCI 2009
 
-| 항목 | KCI 2009 | 제안 scheme |
-|------|----------|-------------|
-| 대상 latency | 단일 predictor latency | mBTB/TAGE slow-path latency |
-| Decoupling | predictor/fetch decoupling | prefetch buffer 기반 |
-| Final correction | 구조별 상이 | S3 final override 항상 유지 |
-
----
-
-## 4. 종합 비교
-
-| 논문 | 메커니즘 유사도 | 목적 유사도 | 참고 우선순위 |
-|------|----------------|------------|--------------|
-| LLBP (MICRO 2024) | 높음 | 중간 | 1순위: lookahead + buffer + history guard 참고 |
-| HPCA 2013 | 중간 | 높음 | 2순위: two-level BTB preload 관점 참고 |
-| KCI 2009 | 중간 | 중간 | 3순위: latency hiding 방향성 참고 |
-
-제안 scheme은 LLBP의 lookahead/buffer 개념을 XiangShan의 mBTB/TAGE slow path에 맞게 적용하되, dedicated read port를 추가하지 않고 banking 확장과 conflict-free opportunistic issue를 사용한다.
+| Item | KCI 2009 | Proposed Scheme |
+| --- | --- | --- |
+| Target latency | single predictor latency | mBTB/TAGE slow-path latency |
+| Decoupling | predictor/fetch decoupling | prefetch buffer based |
+| Final correction | varies by structure | S3 final override always preserved |
 
 ---
 
-## 5. Chisel 아키텍처 변경 사항
+## 4. Summary Comparison
 
-이 section은 Chisel RTL 기준 변경 사항만 다룬다. gem5 모델은 별도 코드 확인 후 기능 등가 수준으로 다시 정의해야 하며, 여기서는 구체 구현 파일이나 클래스명을 가정하지 않는다.
+| Paper | Mechanism Similarity | Goal Similarity | Reference Priority |
+| --- | --- | --- | --- |
+| LLBP (MICRO 2024) | High | Medium | 1st: reference lookahead + buffer + history guard |
+| HPCA 2013 | Medium | High | 2nd: reference two-level BTB preload perspective |
+| KCI 2009 | Medium | Medium | 3rd: reference latency hiding direction |
+
+The proposed scheme applies LLBP's lookahead/buffer concept to XiangShan's mBTB/TAGE slow path, but without adding dedicated read ports — using banking expansion and conflict-free opportunistic issue instead.
+
+---
+
+## 5. Chisel Architecture Changes
+
+This section covers only Chisel RTL-level changes. The gem5 model must be separately re-defined to functional equivalence after reviewing its code; specific implementation file or class names are not assumed here.
 
 ### 5.0 Scope Decision
 
-구현 범위:
+Implementation scope:
 
-- 포함: mBTB + TAGE prefetch
-- 제외: SC, ITTAGE, RAS prefetch
-- S1에서 buffer hit 시 prefetch result로 prediction 대체
-- S3 final path는 항상 유지
-- `s3_override`는 suppress하지 않음
+- Included: mBTB + TAGE prefetch
+- Excluded: SC, ITTAGE, RAS prefetch
+- On buffer hit at S1, replace prediction with prefetch result
+- S3 final path is always preserved
+- `s3_override` is not suppressed
 
-즉, 이 구현은 correctness-preserving optimization이다. buffer result가 틀려도 기존 S3 override가 최종 보정한다.
+This implementation is a correctness-preserving optimization. Even if a buffer result is wrong, the existing S3 override will make the final correction.
 
 ---
 
 ### 5.1 `bpu/ubtb/Parameters.scala` — MicroBtbParameters
 
-추가 파라미터:
+Added parameters:
 
 ```scala
 case class MicroBtbParameters(
@@ -413,45 +413,45 @@ case class MicroBtbParameters(
 )
 ```
 
-`FoldedHistoryDeltaWidth`는 TAGE table별 folded history delta 표현 방식에 따라 결정한다.
+`FoldedHistoryDeltaWidth` is determined by the per-table folded history delta encoding for TAGE.
 
 ---
 
 ### 5.2 `bpu/ubtb/Bundles.scala` — MicroBtbEntry
 
-`MicroBtbEntry`에 3-ahead metadata 추가:
+Add 3-ahead metadata to `MicroBtbEntry`:
 
 ```scala
 val aheadValid: Bool = Bool()
 val aheadPc:    PrunedAddr = PrunedAddr(VAddrBits)
 
-// TAGE folded history를 PC_{X+3} 기준으로 보정하기 위한 precomputed delta
+// Precomputed delta for correcting TAGE folded history to the PC_{X+3} reference point
 val foldedHistoryDelta: UInt = UInt(FoldedHistoryDeltaWidth.W)
 
-// prefetch buffer hit guard
+// Short signature for prefetch issue validity filtering
 val historySignature: UInt = UInt(HistorySignatureWidth.W)
 ```
 
-주의:
+Notes:
 
-- `aheadPc`는 partial target이 아니라 full/pruned PC이다.
-- uBTB entry width 증가가 크므로 area 평가가 필요하다.
+- `aheadPc` is a full/pruned PC, not a partial target.
+- The increase in uBTB entry width is significant; area evaluation is required.
 
 ---
 
-### 5.3 `bpu/ubtb/MicroBtb.scala` — threeAhead Metadata 경로
+### 5.3 `bpu/ubtb/MicroBtb.scala` — threeAhead Metadata Path
 
 Predict side:
 
-- uBTB hit entry에서 `aheadValid`, `aheadPc`, `foldedHistoryDelta`, `historySignature`를 출력한다.
-- 기존 `io.prediction`과 별도 출력으로 두는 것이 좋다.
+- Output `aheadValid`, `aheadPc`, `foldedHistoryDelta`, `historySignature` from the uBTB hit entry.
+- Prefer a separate output from the existing `io.prediction`.
 
 Train side:
 
-- 기존 `fastTrain`은 slot1 prediction 학습을 유지한다.
-- 3-ahead metadata는 별도 commit-based train channel로 갱신한다.
+- Existing `fastTrain` continues training slot1 predictions.
+- 3-ahead metadata is updated via a separate commit-based train channel.
 
-예시 IO:
+Example IO:
 
 ```scala
 val aheadInfo: Valid[UbtbAheadInfo] = Output(Valid(new UbtbAheadInfo))
@@ -460,9 +460,9 @@ val aheadTrain: Valid[UbtbAheadTrain] = Input(Valid(new UbtbAheadTrain))
 
 ---
 
-### 5.4 신규 모듈 — `bpu/mbtb/MbtbTagePrefetchBuffer.scala`
+### 5.4 New Module — `bpu/mbtb/MbtbTagePrefetchBuffer.scala`
 
-32-entry fully-associative CAM buffer를 추가한다.
+Add a 32-entry fully-associative CAM buffer.
 
 Entry:
 
@@ -501,31 +501,31 @@ val writeData: Prediction
 Required behavior:
 
 - CAM compare key: `{pcTag, historySignature}`
-- same-cycle write-read bypass 지원
-- redirect 시 flush 불필요 (historySignature staleness guard로 충분, S3 override가 correctness 보장)
-- replacement: PLRU 또는 round-robin
+- same-cycle write-read bypass supported
+- No flush needed on redirect (historySignature staleness guard is sufficient; S3 override guarantees correctness)
+- replacement: PLRU or round-robin
 
 Timing risk:
 
-- S1 prediction path에 CAM compare와 mux가 추가된다.
-- 3-ahead에서 bypass는 필수이며 S0 lookup / S1 use 구조는 타이밍상 불가능하다 (prefetch 완료가 S0보다 늦음).
-- timing closure 실패 시 허용 가능한 fallback은 scheme 자체를 4-ahead로 전환하는 것이다 (완료 N+4, S0 lookup N+4, S1 use N+5, bypass 부담을 S0 레벨로 이동).
+- The S1 prediction path gains a CAM compare and a mux.
+- Bypass is mandatory for 3-ahead; S0 lookup / S1 use is timing-infeasible (prefetch completes after S0).
+- If timing closure fails, the only viable fallback is switching the scheme to 4-ahead (completion N+4, S0 lookup N+4, S1 use N+5, moving bypass burden to the S0 level).
 
 ---
 
 ### 5.5 `bpu/mbtb/MainBtb.scala` — Opportunistic Prefetch Read
 
-2nd read port는 추가하지 않는다.
+No 2nd read port is added.
 
-변경 방향:
+Changes:
 
-- prefetch read request를 받을 수 있는 sideband IO 추가
-- regular prediction read가 항상 우선
-- prefetch read는 bank conflict가 없을 때만 issue
-- conflict가 있으면 drop
-- retry queue는 두지 않는다
+- Add sideband IO to accept prefetch read requests
+- Regular prediction read always has priority
+- Prefetch read is issued only when there is no bank conflict
+- Dropped on conflict
+- No retry queue
 
-필요 로직:
+Required logic:
 
 ```scala
 val prefetchReqValid: Bool
@@ -534,39 +534,39 @@ val prefetchAccepted: Bool
 val prefetchDroppedByBankConflict: Bool
 ```
 
-mBTB conflict 감소 방향:
+mBTB conflict reduction options:
 
-- `NumInternalBanks` 증가 검토
-- banking hash 개선 검토
-- align bank/internal bank conflict counter 추가
+- Consider increasing `NumInternalBanks`
+- Consider improving the banking hash function
+- Add align bank/internal bank conflict counters
 
 ---
 
-### 5.6 `bpu/history/phr/Phr.scala` — Prefetch Folded History 생성
+### 5.6 `bpu/history/phr/Phr.scala` — Prefetch Folded History Generation
 
-현재 PHR은 stage별 folded history를 제공한다.
-prefetch path에는 `PC_{X+3}` 기준 TAGE lookup을 위한 speculative folded history가 필요하다.
+The PHR currently provides per-stage folded histories.
+The prefetch path requires a speculative folded history for TAGE lookup at `PC_{X+3}`.
 
-변경 방향:
+Changes:
 
-- uBTB에서 읽은 `foldedHistoryDelta`를 현재 `s0_foldedPhr`에 적용
-- table별 folded history를 보정한 `prefetchFoldedPhr` 생성
-- `historySignature` 계산용 hash도 함께 생성
+- Apply the `foldedHistoryDelta` read from uBTB to the current `s0_foldedPhr`
+- Generate `prefetchFoldedPhr` with per-table folded history correction
+- Also generate the hash for `historySignature` computation
 
-예시 IO:
+Example IO:
 
 ```scala
 val prefetchDeltaValid: Input(Bool())
 val prefetchFoldedHistoryDelta: Input(UInt(FoldedHistoryDeltaWidth.W))
 val prefetchFoldedPhr: Output(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
-val prefetchHistorySignature: Output(UInt(HistorySignatureWidth.W))  // write key용: hash(prefetchFoldedPhr)
-val s1HistorySignature: Output(UInt(HistorySignatureWidth.W))        // read key용: hash(s1_foldedPhr)
+val prefetchHistorySignature: Output(UInt(HistorySignatureWidth.W))  // write key: hash(prefetchFoldedPhr)
+val s1HistorySignature: Output(UInt(HistorySignatureWidth.W))        // read key: hash(s1_foldedPhr)
 ```
 
-Apply 방법:
+Apply method:
 
 ```scala
-// AllFoldedHistoryInfo에서 테이블별 slice 범위를 정적으로 결정
+// Per-table slice ranges are determined statically from AllFoldedHistoryInfo
 for (i <- 0 until numTageTables) {
   val lo = foldedHistorySliceLo(i)
   val hi = foldedHistorySliceHi(i)
@@ -574,27 +574,27 @@ for (i <- 0 until numTageTables) {
 }
 ```
 
-주의:
+Notes:
 
-- 단순 `shift_and_append(takenBits)` 방식이 아니다.
-- PHR update가 `pathHash(cfiPc, target)` 영향을 받으므로, commit-time에 table별 folded delta를 미리 계산해 저장하는 방식을 우선 고려한다.
-- delta XOR 계산은 `AllFoldedHistoryInfo`의 테이블 순서와 width를 그대로 따른다.
+- This is not a simple `shift_and_append(takenBits)` operation.
+- Because PHR updates are influenced by `pathHash(cfiPc, target)`, the preferred approach is to precompute per-table folded deltas at commit time and store them.
+- The delta XOR computation follows the table order and widths defined in `AllFoldedHistoryInfo`.
 
 ---
 
 ### 5.7 `bpu/tage/Tage.scala` / `TageTable.scala` — Opportunistic Prefetch Read
 
-2nd read port는 추가하지 않는다.
+No 2nd read port is added.
 
-변경 방향:
+Changes:
 
-- prefetch read request sideband 추가
-- regular read 우선
-- prefetch는 table/bank conflict가 없는 경우에만 issue
-- conflict 시 drop
-- TAGE table banking 확장 또는 hash 개선으로 conflict rate 감소
+- Add sideband prefetch read request IO
+- Regular read has priority
+- Prefetch is issued only when there is no table/bank conflict
+- Dropped on conflict
+- Reduce conflict rate via TAGE table banking expansion or hash improvement
 
-필요 로직:
+Required logic:
 
 ```scala
 val prefetchReqValid: Bool
@@ -604,24 +604,24 @@ val prefetchAccepted: Bool
 val prefetchDroppedByBankConflict: Bool
 ```
 
-prefetch result 조립:
+Prefetch result assembly:
 
-- mBTB prefetch result의 branch candidates를 TAGE prefetch result로 direction 보정
-- SC correction은 적용하지 않음
-- TAGE provider/alt 선택 로직은 prefetch path에도 동일하게 적용
+- Apply TAGE prefetch direction to the branch candidates from the mBTB prefetch result
+- SC correction is not applied
+- TAGE provider/alt selection logic is applied identically on the prefetch path
 
 ---
 
 ### 5.8 `bpu/Bpu.scala` — Main Orchestration
 
-#### (a) uBTB aheadInfo 연결
+#### (a) uBTB aheadInfo wiring
 
 ```scala
 val s1_aheadValid = ubtb.io.aheadInfo.valid
 val s1_aheadPc = ubtb.io.aheadInfo.bits.aheadPc
 val s1_foldedHistoryDelta = ubtb.io.aheadInfo.bits.foldedHistoryDelta
-// uBTB에 저장된 historySignature는 prefetch 발행 유효성 필터 용도로만 사용 (optional).
-// buffer hit key의 historySignature는 별도 runtime 계산값 사용 (아래 (d)(e) 참고).
+// The historySignature stored in the uBTB entry is used only as an optional
+// prefetch issue validity filter; it is not the buffer hit key (see (d)(e) below).
 ```
 
 #### (b) Prefetch request issue
@@ -642,22 +642,22 @@ tage.io.prefetchReq.pc := s1_aheadPc
 tage.io.prefetchReq.foldedPhr := phr.io.prefetchFoldedPhr
 ```
 
-실제 issue는 mBTB와 TAGE가 모두 conflict-free로 accept할 때만 유효하게 본다.
+A prefetch is considered effectively issued only when both mBTB and TAGE accept it conflict-free.
 
-#### (c) Prefetch result 조립
+#### (c) Prefetch result assembly
 
-- mBTB result에서 earliest valid branch candidate 선택
-- conditional branch는 TAGE direction 적용
-- direct branch는 taken으로 사용
-- indirect/return은 buffer write 제외
-- taken=false는 fallThrough-style prediction으로 변환
+- Select the earliest valid branch candidate from the mBTB prefetch result
+- Apply TAGE direction for conditional branches
+- Use mBTB target as taken for direct branches
+- Skip buffer write for indirect/return
+- Convert taken=false to a fallThrough-style prediction
 
 #### (d) Buffer write
 
-write historySignature = prefetch 발행 시(cycle N+2) `phr.io.prefetchHistorySignature`를 result 완료(cycle N+4)까지 파이프라인한 값.
+The write historySignature is `phr.io.prefetchHistorySignature` computed at prefetch issue (cycle N+2), pipelined to the result-ready cycle (N+4).
 
 ```scala
-// prefetch 발행 시 계산: hash(s0_foldedPhr XOR foldedHistoryDelta)
+// Computed at prefetch issue: hash(s0_foldedPhr XOR foldedHistoryDelta)
 val prefetch_s1_histSig = phr.io.prefetchHistorySignature  // cycle N+2
 val prefetch_s2_histSig = RegNext(prefetch_s1_histSig)      // cycle N+3
 val prefetch_s3_histSig = RegNext(prefetch_s2_histSig)      // cycle N+4 (write time)
@@ -670,11 +670,11 @@ prefetchBuffer.io.writeData := prefetchPrediction
 
 #### (e) Buffer read and S1 prediction replacement
 
-read historySignature = S1 of PC_{X+3}(cycle N+4) 시점의 실제 PHR에서 계산한 값.
-speculation이 맞으면 write key == read key → hit.
+The read historySignature is derived from the actual PHR state at S1 of PC_{X+3} (cycle N+4).
+If speculation was correct, write key == read key → hit.
 
 ```scala
-// s1_foldedPhr는 현재 S1 시점의 실제 speculative folded history
+// s1_foldedPhr is the actual speculative folded history at the current S1 point
 val s1_histSig = phr.io.s1HistorySignature  // hash(s1_foldedPhr)
 
 prefetchBuffer.io.readPc := s1_startPc
@@ -689,36 +689,36 @@ when(prefetchBuffer.io.readHit) {
 
 #### (f) S3 override policy
 
-`s3_override` logic은 기존처럼 유지한다.
+`s3_override` logic is preserved as-is.
 
 ```scala
 s3_override := s3_valid && !(s3_prediction === s3_s1Prediction)
 ```
 
-buffer hit만으로 override를 suppress하지 않는다.
+A buffer hit alone does not suppress override.
 
 #### (g) Flush / invalidate
 
-redirect 시 buffer flush는 **불필요**하다.
+Buffer flush on redirect is **not required**.
 
-hit key `{pcTag, historySignature}`가 staleness guard 역할을 한다. redirect 후 실제 history가 달라지면 expectedHistorySignature도 달라져 buffer miss → 기존 uBTB path로 fallback된다. S3 override가 항상 correctness를 보장하므로 wrong-path entry가 buffer에 남아 있어도 문제없다.
+The hit key `{pcTag, historySignature}` acts as a staleness guard. After a redirect, if the actual history diverges, the expectedHistorySignature differs → buffer miss → fallback to the uBTB path. Since S3 override always guarantees correctness, wrong-path entries remaining in the buffer cause no harm.
 
-단, 다음 경우에는 명시적 flush를 검토한다:
+Explicit flush should be considered only in the following cases:
 
-- CSR로 predictor 전체 disable 시
-- large predictor (mBTB/TAGE) full reset 시
+- Predictor-wide disable via CSR
+- Full reset of the large predictor (mBTB/TAGE)
 
 ---
 
-### 5.9 `frontend/Bundles.scala` — FtqToBpuIO 확장
+### 5.9 `frontend/Bundles.scala` — FtqToBpuIO Extension
 
-commit-based threeAhead train channel 추가:
+Add commit-based threeAhead train channel:
 
 ```scala
 val aheadTrain: Valid[UbtbAheadTrain] = Valid(new UbtbAheadTrain)
 ```
 
-Bundle 예시:
+Bundle example:
 
 ```scala
 class UbtbAheadTrain extends BpuBundle {
@@ -731,35 +731,35 @@ class UbtbAheadTrain extends BpuBundle {
 
 ---
 
-### 5.10 `ftq/Ftq.scala` — Commit Window 기반 threeAhead Training
+### 5.10 `ftq/Ftq.scala` — Commit Window-based threeAhead Training
 
-현재 `io.toBpu.train`은 resolve queue 기반이다.
-threeAhead metadata는 commit된 path 기준으로 학습해야 하므로 별도 commit-window 로직이 필요하다.
+The current `io.toBpu.train` is resolve-queue based.
+threeAhead metadata must be trained from the committed path, requiring a separate commit-window logic.
 
-변경 방향:
+Changes:
 
-- FTQ commit side에서 `commitPtr ~ commitPtr+3` window 추적
-- window 내 4개 fetch block이 모두 committed 되었을 때 train 생성
+- Track the `commitPtr ~ commitPtr+3` window on the FTQ commit side
+- Generate a train entry when all 4 fetch blocks in the window have committed
 - `startPc = entryQueue(commitPtr).startPc`
 - `aheadPc = entryQueue(commitPtr + 3).startPc`
-- window 내 branch/path 정보를 이용해 foldedHistoryDelta 계산
-- historySignature 생성
-- `io.toBpu.aheadTrain`으로 전달
+- Compute `foldedHistoryDelta` using branch/path information within the window
+- Generate `historySignature`
+- Forward via `io.toBpu.aheadTrain`
 
-주의:
+Notes:
 
-- commit path에 branch outcome/path hash 정보가 충분한지 확인 필요
-- 부족하면 FTQ entry 또는 별도 side buffer에 commit-time delta 계산용 정보를 추가해야 한다.
-- 이 로직은 기존 resolve-based BPU train과 독립적이다.
+- Verify that the commit path contains sufficient branch outcome / path hash information for delta computation.
+- If not, add the required information to FTQ entries or a separate side buffer for commit-time delta computation.
+- This logic is independent of the existing resolve-based BPU training.
 
 ---
 
 ### 5.11 Correctness Guard and Validation Counters
 
-S3 final path를 유지하므로 correctness는 기존 override path가 보장한다.
-다만 성능 평가와 안정성 검증을 위해 counter가 필요하다.
+Correctness is guaranteed by the existing override path since the S3 final path is preserved.
+Counters are needed for performance evaluation and stability validation.
 
-필수 counter:
+Required counters:
 
 - `prefetchReq`
 - `prefetchAccepted`
@@ -779,28 +779,131 @@ S3 final path를 유지하므로 correctness는 기존 override path가 보장�
 
 ---
 
-### 5.12 변경 범위 요약
+### 5.12 Change Scope Summary
 
-| 파일 | 변경 종류 | 난이도 |
-|------|----------|--------|
-| `bpu/ubtb/Parameters.scala` | threeAhead/history 파라미터 추가 | 낮음 |
-| `bpu/ubtb/Bundles.scala` | uBTB entry metadata 추가 | 중간 |
-| `bpu/ubtb/MicroBtb.scala` | threeAhead output/train 경로 | 중간 |
-| `bpu/mbtb/MbtbTagePrefetchBuffer.scala` | 신규 32-entry CAM buffer | 중간 |
-| `bpu/mbtb/MainBtb.scala` | opportunistic prefetch read arbitration | 높음 |
-| `bpu/history/phr/Phr.scala` | foldedHistoryDelta 적용 | 높음 |
-| `bpu/tage/Tage.scala` / `TageTable.scala` | opportunistic prefetch read arbitration | 높음 |
-| `bpu/Bpu.scala` | prefetch orchestration 및 S1 mux | 높음 |
-| `frontend/Bundles.scala` | aheadTrain IO 추가 | 낮음 |
-| `ftq/Ftq.scala` | commit-window threeAhead training | 높음 |
+| File | Change Type | Difficulty |
+| --- | --- | --- |
+| `bpu/ubtb/Parameters.scala` | Add threeAhead/history parameters | Low |
+| `bpu/ubtb/Bundles.scala` | Add uBTB entry metadata | Medium |
+| `bpu/ubtb/MicroBtb.scala` | threeAhead output/train path | Medium |
+| `bpu/mbtb/MbtbTagePrefetchBuffer.scala` | New 32-entry CAM buffer | Medium |
+| `bpu/mbtb/MainBtb.scala` | Opportunistic prefetch read arbitration | High |
+| `bpu/history/phr/Phr.scala` | foldedHistoryDelta application | High |
+| `bpu/tage/Tage.scala` / `TageTable.scala` | Opportunistic prefetch read arbitration | High |
+| `bpu/Bpu.scala` | Prefetch orchestration and S1 mux | High |
+| `frontend/Bundles.scala` | Add aheadTrain IO | Low |
+| `ftq/Ftq.scala` | Commit-window threeAhead training | High |
 
 ---
 
-## 6. Open Questions
+## 6. Performance Counters
 
-1. FTQ commit side에 delta 계산에 필요한 branch/path hash 정보가 충분한가?
-2. 32-entry CAM이 S1 timing에 들어가도 timing closure가 가능한가? (bypass 포함)
-3. mBTB/TAGE bank conflict rate가 scheme 실효 coverage에 얼마나 영향을 주는가? 구현 전 simulation으로 workload별 conflict rate를 측정하고, prefetchAccepted rate가 목표치(예: 70% 이상)에 미달하면 NumInternalBanks 확장 우선 적용.
-4. same-cycle write-read bypass의 timing이 S1 mux와 함께 닫히는가?
-5. indirect/return 제외 정책이 실제 override 감소 효과를 얼마나 제한하는가?
+Section 5.11 lists counters needed for correctness validation. This section extends that list with counters organized by purpose: functionality verification and performance impact measurement. All counters are implemented as CSR-readable saturating 64-bit event counters unless otherwise noted.
 
+---
+
+### 6.1 Functionality Check Counters
+
+These counters verify that each stage of the prefetch pipeline operates as designed. If any stage shows unexpected values (e.g., `pfAccepted` is always zero, or `pfBypassFired` never fires), it indicates a wiring or logic bug rather than a performance problem.
+
+#### Prefetch Issue Pipeline
+
+| Counter | Trigger Condition | Purpose |
+| --- | --- | --- |
+| `pfReqAttempted` | S1 fires AND `aheadValid` is set | Confirms uBTB threeAhead metadata is being read and prefetch is attempted |
+| `pfAcceptedBoth` | mBTB AND TAGE both accept (no conflict) | Verifies opportunistic issue logic works when both paths are free |
+| `pfDroppedMbtbConflict` | mBTB bank conflict causes drop | Quantifies mBTB conflict rate impact on coverage |
+| `pfDroppedTageConflict` | TAGE bank conflict causes drop | Quantifies TAGE conflict rate impact on coverage |
+| `pfDroppedBoth` | Both mBTB and TAGE conflict simultaneously | Separates total drop into causes |
+
+#### Buffer Write Path
+
+| Counter | Trigger Condition | Purpose |
+| --- | --- | --- |
+| `pfWrittenToBuffer` | Prefetch result valid AND written to buffer | Confirms results are flowing into the CAM |
+| `pfFilteredIndirect` | Prefetch result discarded: indirect branch | Validates indirect exclusion policy is active |
+| `pfFilteredReturn` | Prefetch result discarded: return instruction | Validates return exclusion policy is active |
+| `pfWrittenTaken` | Buffer write with `taken=true` | Distribution of taken vs. not-taken in buffer |
+| `pfWrittenNotTaken` | Buffer write with `taken=false` (stored as fallThrough) | Distribution of not-taken predictions stored |
+
+#### Buffer Read and Bypass
+
+| Counter | Trigger Condition | Purpose |
+| --- | --- | --- |
+| `pfBufferHit` | CAM lookup hits at S1 | Core hit rate numerator |
+| `pfBufferMiss` | CAM lookup misses at S1 | Core hit rate denominator complement |
+| `pfPcTagHitSigMiss` | pcTag matched but `historySignature` did not match | Validates that the staleness guard is catching diverged-history cases |
+| `pfBypassFired` | Same-cycle write-read bypass was triggered | Verifies bypass logic is exercised; if zero, same-cycle write/read never co-occurs |
+
+#### Training Path
+
+| Counter | Trigger Condition | Purpose |
+| --- | --- | --- |
+| `pfAheadTrainIssued` | FTQ commit side emits `aheadTrain` to uBTB | Confirms commit-window tracking fires |
+| `pfUbtbAheadValidOnHit` | uBTB hit AND `aheadValid` is set | Measures training coverage fraction |
+| `pfUbtbAheadInvalidOnHit` | uBTB hit AND `aheadValid` is NOT set | Entries without 3-ahead metadata; indicates cold or untrained entries |
+
+#### S3 Correctness Breakdown (when buffer hit)
+
+| Counter | Trigger Condition | Purpose |
+| --- | --- | --- |
+| `pfHitS3Match` | Buffer hit AND S3 agrees with S1 prediction | Scheme produced a correct result |
+| `pfHitS3Override` | Buffer hit AND S3 overrides S1 prediction | Total overrides despite buffer hit |
+| `pfHitS3OverrideBySc` | S3 override cause: SC direction flip | Identifies how much SC residual limits the scheme |
+| `pfHitS3OverrideByIttage` | S3 override cause: ITTAGE indirect target | Should be rare since indirect is filtered |
+| `pfHitS3OverrideByRas` | S3 override cause: RAS return target | Should be rare since return is filtered |
+| `pfHitS3OverrideByOther` | S3 override: target/position mismatch not covered above | Catches residual stale-result cases |
+
+---
+
+### 6.2 Performance Check Counters
+
+These counters measure the scheme's impact on frontend efficiency. The primary metric of interest is how many S3 overrides were eliminated and what fraction of overrides the scheme could not address.
+
+#### S3 Override Baseline
+
+| Counter | Trigger Condition | Purpose |
+| --- | --- | --- |
+| `s3OverrideTotal` | S3 override fires (any cause) | Baseline reference; compare before and after enabling the scheme |
+| `s3OverrideConditional` | S3 override AND branch is conditional | Isolates the portion the scheme can target |
+| `s3OverrideDirect` | S3 override AND branch is direct | Isolates the portion the scheme can target |
+| `s3OverrideIndirect` | S3 override AND branch is indirect | Portion permanently delegated to ITTAGE |
+| `s3OverrideReturn` | S3 override AND branch is return | Portion permanently delegated to RAS |
+
+#### Scheme Opportunity and Outcome
+
+| Counter | Trigger Condition | Purpose |
+| --- | --- | --- |
+| `s3OverrideWithPfHit` | S3 override fires AND buffer was hit at this S1 | Overrides that the scheme attempted but could not prevent (= `pfHitS3Override`) |
+| `s3OverrideWithPfMiss` | S3 override fires AND buffer was missed at this S1 | Overrides where the scheme had no result available |
+| `s3OverrideWithPfDrop` | S3 override fires AND prefetch was dropped (bank conflict) | Overrides the scheme could not address due to bank conflict |
+| `pfEffectiveOverridePrevented` | Buffer hit AND S3 agreed (= `pfHitS3Match`) | Overrides effectively eliminated by the scheme |
+
+Derived metrics (computed offline from counter pairs):
+
+| Metric | Formula | Interpretation |
+| --- | --- | --- |
+| `pfAcceptRate` | `pfAcceptedBoth / pfReqAttempted` | Bank conflict impact; target ≥ 70% |
+| `pfHitRate` | `pfBufferHit / pfWrittenToBuffer` | Lookahead path accuracy; measures how often aheadPc was correct |
+| `pfSignatureGuardRate` | `pfPcTagHitSigMiss / (pfBufferHit + pfPcTagHitSigMiss)` | Fraction of pcTag matches caught by signature guard |
+| `pfPrecision` | `pfHitS3Match / pfBufferHit` | Fraction of buffer hits that produced a correct S1 prediction |
+| `pfOverrideReductionRate` | `pfEffectiveOverridePrevented / s3OverrideTotal` | Scheme's overall contribution to override reduction |
+| `pfUncoverableRate` | `(s3OverrideIndirect + s3OverrideReturn) / s3OverrideTotal` | Override fraction permanently outside scheme scope |
+| `pfBankConflictLoss` | `s3OverrideWithPfDrop / s3OverrideTotal` | Override fraction lost to bank conflict (motivation for NumInternalBanks increase) |
+
+#### Buffer Sizing Indicators
+
+| Counter | Trigger Condition | Purpose |
+| --- | --- | --- |
+| `pfBufferEviction` | PLRU/round-robin evicts a valid entry | If high relative to `pfBufferHit`, 32 entries may be insufficient |
+| `pfBufferEvictionBeforeUse` | Entry evicted while still valid and never read | Direct indicator that buffer capacity is a bottleneck |
+
+---
+
+## 7. Open Questions
+
+1. Does the FTQ commit side carry sufficient branch outcome / path hash information for delta computation?
+2. Can timing closure be achieved with a 32-entry CAM in the S1 path, including the same-cycle bypass?
+3. How much does the mBTB/TAGE bank conflict rate affect effective scheme coverage? Measure per-workload conflict rates via simulation before implementation; if the prefetchAccepted rate falls below a target (e.g., 70%), prioritize increasing `NumInternalBanks`.
+4. Does the same-cycle write-read bypass timing close together with the S1 mux?
+5. How much does the indirect/return exclusion policy limit the actual reduction in override frequency?
