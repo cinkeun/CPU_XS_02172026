@@ -18,7 +18,7 @@ The baseline ICache has MainPipe receiving 1 fetch bundle/cycle from FTQ. The 2-
 
 3. **Arbitration complexity — FTQ/IFU interface and MainPipe control**: 2 bundle × (TLB hit/miss × Cache hit/miss) combinations; in-order IFU response guarantee; more FTQ backpressure cases. This is the core control path and must be defined before any other module can be implemented correctly. (→ §5.1, §5.5)
 
-4. **Duplicate request merge required**: When two bundles request the same cacheline (`blkPAddr` match), failing to merge DataArray reads and MSHR allocations causes unnecessary bank conflict and MSHR pressure. The merge criterion is `bundle0.blkPAddr == bundle1.blkPAddr`; "sequential adjacent" or "combined size ≤ 64B" are not sufficient. (→ §5.1, §5.4)
+4. **Duplicate request merge required**: Duplicate handling has two levels. WayLookup/MainPipe-level merge is a hit-path optimization that avoids duplicate DataArray reads when two slots resolve to the same cacheline (`pTag + vSetIdx` match). MSHR-level merge is mandatory for miss-path correctness and uses the final physical cacheline address (`blkPAddr`) as the merge key. "Sequential adjacent" or "combined size ≤ 64B" are not sufficient merge criteria. (→ §5.1, §5.4)
 
 5. **MissUnit MSHR shortage**: 2-bundle demand misses require up to 2 fetch MSHRs simultaneously. 4 MSHRs are insufficient — fetch MSHRs must double to 8. Prefetch MSHRs expanded to 20 to compensate prefetch BW. (→ §5.4)
 
@@ -238,25 +238,73 @@ val req  : Vec[NumFetchBundles, Decoupled[FtqFetchRequest]]
 val resp : Vec[NumFetchBundles, Valid[ICacheRespBundle]]
 ```
 
-#### Duplicate Detection
+#### Duplicate Detection and Merge Levels
 
-When two bundles request the same cacheline (`bundle0.blkPAddr == bundle1.blkPAddr`):
+Duplicate handling must be split into two levels because the earliest safe information differs by pipeline stage.
+
+**WayLookup/MainPipe-level merge** is a hit-path optimization. At this point the translated tag and set index are already available from WayLookup, so the same-cacheline test can be:
+
+```text
+same_line_hit_path =
+  slot0.pTag   == slot1.pTag &&
+  slot0.vSetIdx == slot1.vSetIdx
+```
+
+When `same_line_hit_path` is true, MainPipe can issue one DataArray read and fan out the returned line data to both bundle consumers. This reduces DataArray bank conflicts and dynamic power. However, this optimization requires per-consumer tracking because a merged WayLookup line may have two independent FTQ consumers.
+
+Required consumer metadata:
+
+```text
+MergedLineConsumer:
+  ftqIdx
+  fetchSlot
+  byteRange
+  valid
+  flushed
+```
+
+Flush handling:
+
+- If slot 0 is flushed, slot 1 is also flushed because slot 1 is younger in the same 2-fetch group.
+- If only slot 1 is flushed, remove/clear only the slot 1 consumer and keep the slot 0 consumer.
+- If a BPU redirect targets an older FTQ entry, all consumers younger than the redirect are cleared.
+
+**MSHR-level merge** is mandatory for miss-path correctness and resource control. It must use the final physical cacheline address:
+
+```text
+same_line_miss_path = slot0.blkPAddr == slot1.blkPAddr
+```
+
+MSHR merge is still required even if WayLookup/MainPipe merge is implemented, because new misses can also match already outstanding MSHRs from older requests or prefetches.
 
 | Case | Behavior |
 | --- | --- |
-| Duplicate + both hit | Issue DataArray read only once, share result |
-| Duplicate + both miss | Issue 1 req to MissUnit; bundle 1 registered as waiter |
-| Duplicate + B0 hit / B1 miss | Respond to both using B0's DataArray result |
+| Same-line hit path | One DataArray read; both consumers receive slices from the same returned line |
+| Same-line miss path | One MSHR allocation; all consumers are registered as waiters |
+| Existing MSHR match | Do not allocate a new MSHR; attach the demand consumer to the existing MSHR |
+| Prefetch MSHR hit by demand | Attach demand consumer and promote priority to demand |
+
+Implementation recommendation:
+
+- v1 must implement MSHR-level merge.
+- WayLookup/MainPipe-level merge should be implemented if timing and flush consumer tracking are acceptable.
+- If WayLookup/MainPipe merge is deferred, correctness remains intact, but same-line hit cases may perform duplicate DataArray reads.
 
 #### S0 Advance Conditions
 
 ```text
+b1NeedsDataRead  = !same_line_hit_path
+b1ConsumerReady  = !same_line_hit_path || mergeConsumerAllocated
+
 s0_canGo[0] = toData[0].ready && fromWayLookup.slot0.ready && s1_ready[0]
-s0_canGo[1] = toData[1].ready && fromWayLookup.slot0.ready && fromWayLookup.slot1.ready && s1_ready[1]
-              && !duplicate && !subbank_conflict
+s0_canGo[1] = fromWayLookup.slot0.ready && fromWayLookup.slot1.ready && s1_ready[1]
+              && b1ConsumerReady
+              && (!b1NeedsDataRead || (toData[1].ready && !subbank_conflict))
 fromFtq[0].ready = s0_canGo[0]
 fromFtq[1].ready = s0_canGo[0] && s0_canGo[1]
 ```
+
+For a same-line hit-path merge, slot 1 must still be accepted as a consumer. It should not be stalled simply because it does not need a separate DataArray read.
 
 #### S1 In-Order Response Policy
 
@@ -435,7 +483,7 @@ fetchMSHRs    : 4 → 8    (Arbiter(8+1))
 prefetchMSHRs : 10 → 20
 ```
 
-#### Duplicate Merge
+#### MSHR-Level Duplicate Merge
 
 ```scala
 val same_cacheline = (bundle0.blkPAddr === bundle1.blkPAddr) && bundle0_miss && bundle1_miss
@@ -447,6 +495,28 @@ when(same_cacheline):
 .otherwise:
   // allocate independent MSHRs for bundle 0 and bundle 1
 ```
+
+The MSHR merge key is the physical cacheline address and must be checked against both:
+
+- the other slot in the same cycle
+- all already allocated fetch/prefetch MSHRs
+
+Required behavior:
+
+```text
+if demand miss matches existing fetch MSHR:
+    attach demand consumer to existing fetch MSHR
+else if demand miss matches existing prefetch MSHR:
+    attach demand consumer
+    promote entry priority/class to demand
+else if slot0 and slot1 miss same blkPAddr:
+    allocate one fetch MSHR
+    attach both slot consumers
+else:
+    allocate independent fetch MSHRs if credits are available
+```
+
+WayLookup/MainPipe-level merge is not sufficient for miss correctness because it only sees the currently paired slots. MSHR-level merge is the final guard against duplicate outstanding physical-line requests.
 
 #### L2 Acquire Priority
 
